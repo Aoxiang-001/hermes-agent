@@ -11,6 +11,8 @@ Handles loading and validating configuration for:
 import logging
 import os
 import json
+import shlex
+import shutil
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
@@ -65,8 +67,123 @@ class Platform(Enum):
     WECOM = "wecom"
     WECOM_CALLBACK = "wecom_callback"
     WEIXIN = "weixin"
+    NIM = "nim"
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
+
+
+@dataclass(slots=True)
+class NimCredentials:
+    app_key: str
+    account: str
+    token: str
+
+
+@dataclass(slots=True)
+class NimResolvedConfig:
+    enabled: bool
+    credentials: NimCredentials | None
+    allowed_users: List[str] = field(default_factory=list)
+    allow_all_users: bool = False
+    group_policy: str = "allowlist"
+    group_allowlist: List[str] = field(default_factory=list)
+    home_channel: str | None = None
+    bridge_command: List[str] = field(default_factory=list)
+    media_max_mb: int = 30
+    debug: bool = False
+    raw_extra: Dict[str, Any] = field(default_factory=dict)
+
+    def configured(self) -> bool:
+        return self.enabled and self.credentials is not None
+
+    def to_bridge_payload(self) -> Dict[str, Any]:
+        creds = self.credentials
+        return {
+            "enabled": self.enabled,
+            "credentials": {
+                "app_key": creds.app_key if creds else "",
+                "account": creds.account if creds else "",
+                "token": creds.token if creds else "",
+            },
+            "debug": self.debug,
+            "media_max_mb": self.media_max_mb,
+            "home_channel": self.home_channel,
+        }
+
+
+def parse_nim_token(value: Any) -> NimCredentials | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    parts = raw.split("|", 2) if "|" in raw else raw.split("-", 2)
+    if len(parts) != 3 or any(not part for part in parts):
+        return None
+    return NimCredentials(app_key=parts[0], account=parts[1], token=parts[2])
+
+
+def _default_nim_bridge_dir() -> Path:
+    return Path(__file__).resolve().parent / "platforms" / "nim_bridge_js"
+
+
+def _default_nim_bridge_command() -> List[str]:
+    return ["node", str(_default_nim_bridge_dir() / "index.mjs")]
+
+
+def _resolve_nim_bridge_command(value: Any) -> List[str]:
+    if value is None:
+        return _default_nim_bridge_command()
+    if isinstance(value, str):
+        parts = shlex.split(value)
+        return parts or _resolve_nim_bridge_command(None)
+    if isinstance(value, (list, tuple)):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+        return parts or _resolve_nim_bridge_command(None)
+    raise TypeError("NIM bridge_command must be a string or sequence of strings")
+
+
+def _parse_csv_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()]
+
+
+def load_nim_config(
+    platform: "PlatformConfig",
+    environ: Dict[str, str] | None = None,
+) -> NimResolvedConfig:
+    env = environ or dict(os.environ)
+    extra = dict(platform.extra or {})
+
+    nim_token = extra.get("nim_token") or env.get("NIM_CREDENTIALS")
+    credentials = parse_nim_token(nim_token)
+    if credentials is None:
+        app_key = extra.get("app_key") or env.get("NIM_APP_KEY")
+        account = extra.get("account") or env.get("NIM_ACCOUNT")
+        token = extra.get("token") or env.get("NIM_TOKEN")
+        if app_key and account and token:
+            credentials = NimCredentials(
+                app_key=str(app_key).strip(),
+                account=str(account).strip(),
+                token=str(token).strip(),
+            )
+
+    return NimResolvedConfig(
+        enabled=platform.enabled,
+        credentials=credentials,
+        allowed_users=_parse_csv_list(extra.get("allowed_users") or env.get("NIM_ALLOWED_USERS")),
+        allow_all_users=_coerce_bool(extra.get("allow_all_users", env.get("NIM_ALLOW_ALL_USERS")), default=False),
+        group_policy=str(extra.get("group_policy") or env.get("NIM_GROUP_POLICY") or "allowlist").strip(),
+        group_allowlist=_parse_csv_list(extra.get("group_allowlist") or env.get("NIM_GROUP_ALLOWLIST")),
+        home_channel=str(extra.get("home_channel") or env.get("NIM_HOME_CHANNEL") or "").strip() or None,
+        bridge_command=_resolve_nim_bridge_command(extra.get("bridge_command") or env.get("NIM_BRIDGE_COMMAND")),
+        media_max_mb=int(extra.get("media_max_mb") or env.get("NIM_MEDIA_MAX_MB") or 30),
+        debug=_coerce_bool(extra.get("debug", env.get("NIM_DEBUG")), default=False),
+        raw_extra=extra,
+    )
 
 
 @dataclass
@@ -321,7 +438,10 @@ class GatewayConfig:
                 config.extra.get("client_secret") or os.getenv("DINGTALK_CLIENT_SECRET")
             ):
                 connected.append(platform)
-        
+            # NIM uses bridge credentials from config.extra or env vars
+            elif platform == Platform.NIM and load_nim_config(config).configured():
+                connected.append(platform)
+
         return connected
     
     def get_home_channel(self, platform: Platform) -> Optional[HomeChannel]:
@@ -1187,6 +1307,56 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                 chat_id=weixin_home,
                 name=os.getenv("WEIXIN_HOME_CHANNEL_NAME", "Home"),
             )
+
+    # NIM
+    nim_token = os.getenv("NIM_CREDENTIALS")
+    nim_app_key = os.getenv("NIM_APP_KEY")
+    nim_account = os.getenv("NIM_ACCOUNT")
+    nim_secret = os.getenv("NIM_TOKEN")
+    if nim_token or (nim_app_key and nim_account and nim_secret):
+        if Platform.NIM not in config.platforms:
+            config.platforms[Platform.NIM] = PlatformConfig()
+        config.platforms[Platform.NIM].enabled = True
+        extra = config.platforms[Platform.NIM].extra
+        if nim_token:
+            extra["nim_token"] = nim_token
+        if nim_app_key:
+            extra["app_key"] = nim_app_key
+        if nim_account:
+            extra["account"] = nim_account
+        if nim_secret:
+            extra["token"] = nim_secret
+        nim_bridge_command = os.getenv("NIM_BRIDGE_COMMAND", "").strip()
+        if nim_bridge_command:
+            extra["bridge_command"] = nim_bridge_command
+        nim_group_policy = os.getenv("NIM_GROUP_POLICY", "").strip().lower()
+        if nim_group_policy:
+            extra["group_policy"] = nim_group_policy
+        nim_group_allowlist = os.getenv("NIM_GROUP_ALLOWLIST", "").strip()
+        if nim_group_allowlist:
+            extra["group_allowlist"] = _parse_csv_list(nim_group_allowlist)
+        nim_allowed_users = os.getenv("NIM_ALLOWED_USERS", "").strip()
+        if nim_allowed_users:
+            extra["allowed_users"] = _parse_csv_list(nim_allowed_users)
+        nim_allow_all_users = os.getenv("NIM_ALLOW_ALL_USERS", "").strip()
+        if nim_allow_all_users:
+            extra["allow_all_users"] = _coerce_bool(nim_allow_all_users, default=False)
+        nim_media_max_mb = os.getenv("NIM_MEDIA_MAX_MB", "").strip()
+        if nim_media_max_mb:
+            try:
+                extra["media_max_mb"] = int(nim_media_max_mb)
+            except ValueError:
+                pass
+        nim_debug = os.getenv("NIM_DEBUG", "").strip()
+        if nim_debug:
+            extra["debug"] = _coerce_bool(nim_debug, default=False)
+    nim_home = os.getenv("NIM_HOME_CHANNEL", "").strip()
+    if nim_home and Platform.NIM in config.platforms:
+        config.platforms[Platform.NIM].home_channel = HomeChannel(
+            platform=Platform.NIM,
+            chat_id=nim_home,
+            name=os.getenv("NIM_HOME_CHANNEL_NAME", "Home"),
+        )
 
     # BlueBubbles (iMessage)
     bluebubbles_server_url = os.getenv("BLUEBUBBLES_SERVER_URL")

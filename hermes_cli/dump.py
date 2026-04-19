@@ -110,9 +110,13 @@ def _configured_platforms() -> list[str]:
         "wecom": "WECOM_BOT_ID",
         "wecom_callback": "WECOM_CALLBACK_CORP_ID",
         "weixin": "WEIXIN_ACCOUNT_ID",
+        "nim": "NIM_CREDENTIALS",
         "qqbot": "QQ_APP_ID",
     }
-    return [name for name, env in checks.items() if os.getenv(env)]
+    configured = [name for name, env in checks.items() if os.getenv(env)]
+    if "nim" not in configured and all(os.getenv(var, "") for var in ("NIM_APP_KEY", "NIM_ACCOUNT", "NIM_TOKEN")):
+        configured.append("nim")
+    return configured
 
 
 def _memory_provider(config: dict) -> str:

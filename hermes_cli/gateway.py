@@ -2325,6 +2325,35 @@ _PLATFORMS = [
         "token_var": "WEIXIN_ACCOUNT_ID",
     },
     {
+        "key": "nim",
+        "label": "NIM",
+        "emoji": "☁️",
+        "token_var": "NIM_CREDENTIALS",
+        "setup_instructions": [
+            "1. Prepare a NetEase IM bot account with App Key, account, and token",
+            "2. Hermes auto-installs @yxim/nim-bot on first start when npm is available",
+            "3. Use either NIM_CREDENTIALS=appKey|account|token or fill the discrete fields below",
+            "4. Group chats reply only when the bot is mentioned and the team passes the configured group policy",
+        ],
+        "vars": [
+            {"name": "NIM_CREDENTIALS", "prompt": "Credentials (appKey|account|token, optional if using discrete fields)", "password": True,
+             "help": "Compact credential form. Leave empty if you prefer the explicit fields below."},
+            {"name": "NIM_APP_KEY", "prompt": "App Key (optional when NIM_CREDENTIALS is set)", "password": False,
+             "help": "NetEase IM App Key."},
+            {"name": "NIM_ACCOUNT", "prompt": "Bot account (optional when NIM_CREDENTIALS is set)", "password": False,
+             "help": "The NIM bot account Hermes should log in with."},
+            {"name": "NIM_TOKEN", "prompt": "Bot token (optional when NIM_CREDENTIALS is set)", "password": True,
+             "help": "The token for the configured bot account."},
+            {"name": "NIM_ALLOWED_USERS", "prompt": "Allowed DM user IDs (comma-separated, or empty)", "password": False,
+             "is_allowlist": True,
+             "help": "Optional DM allowlist. Leave empty and use NIM_ALLOW_ALL_USERS=true if you want open DM access."},
+            {"name": "NIM_HOME_CHANNEL", "prompt": "Home target (e.g. user:123 or team:456, optional)", "password": False,
+             "help": "Default delivery target for cron jobs and cross-platform notifications."},
+            {"name": "NIM_BRIDGE_COMMAND", "prompt": "Bridge command (optional override)", "password": False,
+             "help": "Leave empty to use the bundled Node bridge under gateway/platforms/nim_bridge_js. Override only if you want a custom bridge runtime."},
+        ],
+    },
+    {
         "key": "bluebubbles",
         "label": "BlueBubbles (iMessage)",
         "emoji": "💬",
@@ -2424,6 +2453,13 @@ def _platform_status(platform: dict) -> str:
         if val and token:
             return "configured"
         if val or token:
+            return "partially configured"
+        return "not configured"
+    if platform.get("key") == "nim":
+        explicit = all(get_env_value(name) for name in ("NIM_APP_KEY", "NIM_ACCOUNT", "NIM_TOKEN"))
+        if val or explicit:
+            return "configured"
+        if any(get_env_value(name) for name in ("NIM_APP_KEY", "NIM_ACCOUNT", "NIM_TOKEN", "NIM_BRIDGE_COMMAND")):
             return "partially configured"
         return "not configured"
     if val:

@@ -1816,6 +1816,7 @@ class GatewayRunner:
                        "WECOM_ALLOWED_USERS",
                        "WECOM_CALLBACK_ALLOWED_USERS",
                        "WEIXIN_ALLOWED_USERS",
+                       "NIM_ALLOWED_USERS",
                        "BLUEBUBBLES_ALLOWED_USERS",
                        "QQ_ALLOWED_USERS",
                        "GATEWAY_ALLOWED_USERS")
@@ -1831,6 +1832,7 @@ class GatewayRunner:
                        "WECOM_ALLOW_ALL_USERS",
                        "WECOM_CALLBACK_ALLOW_ALL_USERS",
                        "WEIXIN_ALLOW_ALL_USERS",
+                       "NIM_ALLOW_ALL_USERS",
                        "BLUEBUBBLES_ALLOW_ALL_USERS",
                        "QQ_ALLOW_ALL_USERS")
         )
@@ -2670,6 +2672,17 @@ class GatewayRunner:
                 return None
             return WeixinAdapter(config)
 
+        elif platform == Platform.NIM:
+            from gateway.platforms.nim import NimAdapter, check_nim_requirements
+            if not check_nim_requirements(config):
+                logger.warning(
+                    "NIM: bridge runtime is unavailable. Hermes auto-installs the bundled "
+                    "@yxim/nim-bot when npm is available; otherwise install it under "
+                    "gateway/platforms/nim_bridge_js or override NIM_BRIDGE_COMMAND."
+                )
+                return None
+            return NimAdapter(config)
+
         elif platform == Platform.MATTERMOST:
             from gateway.platforms.mattermost import MattermostAdapter, check_mattermost_requirements
             if not check_mattermost_requirements():
@@ -2754,6 +2767,7 @@ class GatewayRunner:
             Platform.WECOM: "WECOM_ALLOWED_USERS",
             Platform.WECOM_CALLBACK: "WECOM_CALLBACK_ALLOWED_USERS",
             Platform.WEIXIN: "WEIXIN_ALLOWED_USERS",
+            Platform.NIM: "NIM_ALLOWED_USERS",
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOWED_USERS",
             Platform.QQBOT: "QQ_ALLOWED_USERS",
         }
@@ -2775,6 +2789,7 @@ class GatewayRunner:
             Platform.WECOM: "WECOM_ALLOW_ALL_USERS",
             Platform.WECOM_CALLBACK: "WECOM_CALLBACK_ALLOW_ALL_USERS",
             Platform.WEIXIN: "WEIXIN_ALLOW_ALL_USERS",
+            Platform.NIM: "NIM_ALLOW_ALL_USERS",
             Platform.BLUEBUBBLES: "BLUEBUBBLES_ALLOW_ALL_USERS",
             Platform.QQBOT: "QQ_ALLOW_ALL_USERS",
         }
@@ -3740,6 +3755,11 @@ class GatewayRunner:
             or getattr(session_entry, "was_auto_reset", False)
         )
         if _is_new_session:
+            try:
+                from gateway.channel_directory import build_channel_directory
+                build_channel_directory(self.adapters)
+            except Exception:
+                logger.debug("Channel directory refresh failed for new session", exc_info=True)
             await self.hooks.emit("session:start", {
                 "platform": source.platform.value if source.platform else "",
                 "user_id": source.user_id,

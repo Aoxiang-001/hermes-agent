@@ -124,6 +124,11 @@ py-modules = ["run_agent", "model_tools", "toolsets", "batch_runner", "trajector
 
 [tool.setuptools.package-data]
 hermes_cli = ["web_dist/**/*"]
+gateway = [
+  "platforms/nim_bridge_js/index.mjs",
+  "platforms/nim_bridge_js/package.json",
+  "platforms/nim_bridge_js/src/*.mjs",
+]
 
 [tool.setuptools.packages.find]
 include = ["agent", "tools", "tools.*", "hermes_cli", "gateway", "gateway.*", "tui_gateway", "tui_gateway.*", "cron", "acp_adapter", "plugins", "plugins.*"]

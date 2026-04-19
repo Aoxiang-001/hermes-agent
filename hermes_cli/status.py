@@ -316,12 +316,16 @@ def show_status(args):
         "WeCom": ("WECOM_BOT_ID", "WECOM_HOME_CHANNEL"),
         "WeCom Callback": ("WECOM_CALLBACK_CORP_ID", None),
         "Weixin": ("WEIXIN_ACCOUNT_ID", "WEIXIN_HOME_CHANNEL"),
+        "NIM": ("NIM_CREDENTIALS", "NIM_HOME_CHANNEL"),
         "BlueBubbles": ("BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_HOME_CHANNEL"),
         "QQBot": ("QQ_APP_ID", "QQBOT_HOME_CHANNEL"),
     }
     
     for name, (token_var, home_var) in platforms.items():
         token = os.getenv(token_var, "")
+        if name == "NIM" and not token:
+            if all(os.getenv(var, "") for var in ("NIM_APP_KEY", "NIM_ACCOUNT", "NIM_TOKEN")):
+                token = "configured"
         has_token = bool(token)
         
         home_channel = ""

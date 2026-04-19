@@ -1,0 +1,12 @@
+{
+  "name": "hermes-agent-nim-bridge",
+  "private": true,
+  "type": "module",
+  "description": "Bundled Node bridge for Hermes Agent NIM support",
+  "scripts": {
+    "test": "node --test ./test/*.test.mjs"
+  },
+  "dependencies": {
+    "@yxim/nim-bot": "^10.9.78"
+  }
+}

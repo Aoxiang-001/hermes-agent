@@ -1,4 +1,6 @@
 graft skills
 graft optional-skills
+recursive-include gateway/platforms/nim_bridge_js *.mjs package.json
+prune gateway/platforms/nim_bridge_js/node_modules
 global-exclude __pycache__
 global-exclude *.py[cod]
