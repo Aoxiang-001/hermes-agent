@@ -3,8 +3,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from gateway.config import PlatformConfig, load_nim_config, load_nim_instances
+from gateway.config import Platform, PlatformConfig, load_nim_config, load_nim_instances
 from gateway.platforms.nim import MultiNimAdapter, NimAdapter, _ensure_bundled_nim_sdk, check_nim_requirements
+from gateway.run import GatewayRunner
 
 
 class FakeBridge:
@@ -283,6 +284,29 @@ async def test_multi_instance_routes_send_to_matching_bridge():
             "reply_to": None,
         }
     ]
+
+
+def test_runner_uses_multi_adapter_for_single_explicit_instance(monkeypatch):
+    config = PlatformConfig(
+        enabled=True,
+        extra={
+            "instances": [
+                {
+                    "instance_name": "main",
+                    "nim_token": "app|main-bot|secret-main",
+                }
+            ],
+        },
+    )
+    runner = object.__new__(GatewayRunner)
+    runner.config = SimpleNamespace(group_sessions_per_user=True, thread_sessions_per_user=False)
+
+    import gateway.platforms.nim as nim_module
+
+    monkeypatch.setattr(nim_module, "check_nim_requirements", lambda _config: True)
+
+    adapter = GatewayRunner._create_adapter(runner, Platform.NIM, config)
+    assert isinstance(adapter, MultiNimAdapter)
 
 
 def test_check_nim_requirements_supports_explicit_command(tmp_path):

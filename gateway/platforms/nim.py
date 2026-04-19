@@ -316,16 +316,22 @@ class MultiNimAdapter(BasePlatformAdapter):
                 resolved=resolved,
                 event_sink=self.handle_message,
             )
-            try:
-                success = await adapter.connect()
-            except Exception:
-                logger.exception("[nim:%s] connect failed", resolved.instance_name)
-                continue
-            if not success:
-                continue
             self._instances[resolved.instance_name] = adapter
             if self._default_instance_name is None:
                 self._default_instance_name = resolved.instance_name
+            try:
+                success = await adapter.connect()
+            except Exception:
+                self._instances.pop(resolved.instance_name, None)
+                if self._default_instance_name == resolved.instance_name:
+                    self._default_instance_name = next(iter(self._instances), None)
+                logger.exception("[nim:%s] connect failed", resolved.instance_name)
+                continue
+            if not success:
+                self._instances.pop(resolved.instance_name, None)
+                if self._default_instance_name == resolved.instance_name:
+                    self._default_instance_name = next(iter(self._instances), None)
+                continue
             connected += 1
 
         if connected:

@@ -174,6 +174,74 @@ def test_qq_group_allowlist_does_not_authorize_other_groups(monkeypatch):
     assert runner._is_user_authorized(source) is False
 
 
+def test_nim_instance_allowlist_authorizes_dm_without_global_env(monkeypatch):
+    _clear_auth_env(monkeypatch)
+
+    runner, _adapter = _make_runner(
+        Platform.NIM,
+        GatewayConfig(
+            platforms={
+                Platform.NIM: PlatformConfig(
+                    enabled=True,
+                    extra={
+                        "instances": [
+                            {
+                                "instance_name": "main",
+                                "nim_token": "app|bot|secret",
+                                "allowed_users": ["112649"],
+                            }
+                        ],
+                    },
+                ),
+            }
+        ),
+    )
+
+    source = SessionSource(
+        platform=Platform.NIM,
+        user_id="112649",
+        chat_id="main/user:112649",
+        user_name="tester",
+        chat_type="dm",
+    )
+
+    assert runner._is_user_authorized(source) is True
+
+
+def test_nim_group_message_is_authorized_after_instance_filter(monkeypatch):
+    _clear_auth_env(monkeypatch)
+
+    runner, _adapter = _make_runner(
+        Platform.NIM,
+        GatewayConfig(
+            platforms={
+                Platform.NIM: PlatformConfig(
+                    enabled=True,
+                    extra={
+                        "instances": [
+                            {
+                                "instance_name": "main",
+                                "nim_token": "app|bot|secret",
+                                "group_policy": "open",
+                            }
+                        ],
+                    },
+                ),
+            }
+        ),
+    )
+
+    source = SessionSource(
+        platform=Platform.NIM,
+        user_id="112649",
+        chat_id="main/team:123",
+        user_name="tester",
+        chat_type="group",
+    )
+
+    assert runner._is_user_authorized(source) is True
+
+
 @pytest.mark.asyncio
 async def test_unauthorized_dm_pairs_by_default(monkeypatch):
     _clear_auth_env(monkeypatch)

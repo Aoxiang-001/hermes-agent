@@ -2675,6 +2675,7 @@ class GatewayRunner:
         elif platform == Platform.NIM:
             from gateway.platforms.nim import MultiNimAdapter, NimAdapter, check_nim_requirements
             from gateway.config import load_nim_instances
+            nim_instances = load_nim_instances(config)
             if not check_nim_requirements(config):
                 logger.warning(
                     "NIM: bridge runtime is unavailable. Hermes auto-installs the bundled "
@@ -2682,8 +2683,14 @@ class GatewayRunner:
                     "gateway/platforms/nim_bridge_js or override NIM_BRIDGE_COMMAND."
                 )
                 return None
-            if len(load_nim_instances(config)) > 1:
-                return MultiNimAdapter(config)
+            has_explicit_instances = bool(
+                (isinstance(getattr(config, "extra", None), dict) and "instances" in config.extra)
+                or os.getenv("NIM_INSTANCES", "").strip()
+            )
+            if len(nim_instances) > 1 or (nim_instances and has_explicit_instances):
+                return MultiNimAdapter(config, resolved_instances=nim_instances)
+            if nim_instances:
+                return NimAdapter(config, resolved=nim_instances[0])
             return NimAdapter(config)
 
         elif platform == Platform.MATTERMOST:
@@ -2828,6 +2835,34 @@ class GatewayRunner:
         platform_name = source.platform.value if source.platform else ""
         if self.pairing_store.is_approved(platform_name, user_id):
             return True
+
+        if source.platform == Platform.NIM:
+            try:
+                from gateway.config import decode_nim_chat_id, load_nim_config, load_nim_instances
+
+                nim_platform = getattr(getattr(self, "config", None), "platforms", {}).get(Platform.NIM)
+                if nim_platform is not None:
+                    instance_name, _ = decode_nim_chat_id(source.chat_id)
+                    instances = load_nim_instances(nim_platform)
+                    matched = None
+                    if instances:
+                        if instance_name:
+                            matched = next((item for item in instances if item.instance_name == instance_name), None)
+                        elif len(instances) == 1:
+                            matched = instances[0]
+                    else:
+                        legacy = load_nim_config(nim_platform)
+                        if legacy.configured():
+                            matched = legacy
+
+                    if matched is not None:
+                        if source.chat_type != "dm":
+                            return True
+                        if matched.allow_all_users or not matched.allowed_users:
+                            return True
+                        return user_id in {str(item) for item in matched.allowed_users}
+            except Exception:
+                logger.debug("NIM instance authorization fallback failed", exc_info=True)
 
         # Check platform-specific and global allowlists
         platform_allowlist = os.getenv(platform_env_map.get(source.platform, ""), "").strip()
