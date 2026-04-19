@@ -109,6 +109,18 @@ class TestLoadNimConfig:
 
         assert [item.instance_name for item in instances] == ["env"]
 
+    def test_env_instances_override_legacy_env_credentials(self):
+        instances = load_nim_instances(
+            PlatformConfig(enabled=True),
+            {
+                "NIM_CREDENTIALS": "app|legacy|secret-legacy",
+                "NIM_INSTANCES": '[{"instance_name":"main","nim_token":"app|env|secret-env"}]',
+            },
+        )
+
+        assert [item.instance_name for item in instances] == ["main"]
+        assert [item.credentials.account for item in instances if item.credentials is not None] == ["env"]
+
 
 class TestConnectedPlatforms:
     def test_nim_recognized_via_config_extra(self):

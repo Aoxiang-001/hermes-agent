@@ -58,28 +58,22 @@ class NodeBridgeProcess:
         )
         self._stdout_task = asyncio.create_task(self._read_stdout())
         self._stderr_task = asyncio.create_task(self._read_stderr())
-        response = await self.request("connect", {"config": config.to_bridge_payload()})
-        if response.get("status") != "ok":
-            raise BridgeError(response.get("error", "bridge connect failed"))
+        try:
+            response = await self.request("connect", {"config": config.to_bridge_payload()})
+            if response.get("status") != "ok":
+                raise BridgeError(response.get("error", "bridge connect failed"))
+        except Exception:
+            await self._cleanup_process()
+            raise
 
     async def stop(self) -> None:
-        process = self._process
-        if process is None:
+        if self._process is None:
             return
         try:
             await self.request("disconnect", {})
         except Exception:
             pass
-        if process.stdin is not None and not process.stdin.is_closing():
-            process.stdin.close()
-        await process.wait()
-        for task in (self._stdout_task, self._stderr_task):
-            if task is not None and not task.done():
-                task.cancel()
-        for task in list(self._event_tasks):
-            if not task.done():
-                task.cancel()
-        self._process = None
+        await self._cleanup_process()
 
     async def health(self) -> dict[str, Any]:
         response = await self.request("health", {})
@@ -170,6 +164,29 @@ class NodeBridgeProcess:
             return
         except Exception:
             logger.exception("NIM bridge async event handler failed")
+
+    async def _cleanup_process(self) -> None:
+        process = self._process
+        if process is None:
+            return
+        if process.stdin is not None and not process.stdin.is_closing():
+            process.stdin.close()
+        if process.returncode is None:
+            process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+        for task in (self._stdout_task, self._stderr_task):
+            if task is not None and not task.done():
+                task.cancel()
+        for task in list(self._event_tasks):
+            if not task.done():
+                task.cancel()
+        self._process = None
+        self._stdout_task = None
+        self._stderr_task = None
 
     async def _read_stderr(self) -> None:
         assert self._process is not None

@@ -286,6 +286,43 @@ async def test_multi_instance_routes_send_to_matching_bridge():
     ]
 
 
+@pytest.mark.asyncio
+async def test_multi_instance_rejects_unknown_route_prefix():
+    config = PlatformConfig(
+        enabled=True,
+        extra={
+            "nim_token": "app|default-bot|secret-default",
+            "instances": [
+                {
+                    "instance_name": "work",
+                    "nim_token": "app|work-bot|secret-work",
+                }
+            ],
+        },
+    )
+    instances = load_nim_instances(config)
+    bridges = {}
+
+    def bridge_factory(resolved):
+        bridge = FakeBridge()
+        bridges[resolved.instance_name] = bridge
+        return bridge
+
+    adapter = MultiNimAdapter(
+        config,
+        resolved_instances=instances,
+        bridge_factory=bridge_factory,
+    )
+
+    assert await adapter.connect() is True
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        await adapter.send("other/user:200", "hello unknown")
+
+    assert bridges["default"].sent == []
+    assert bridges["work"].sent == []
+
+
 def test_runner_uses_multi_adapter_for_single_explicit_instance(monkeypatch):
     config = PlatformConfig(
         enabled=True,

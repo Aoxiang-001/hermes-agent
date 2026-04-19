@@ -393,6 +393,8 @@ class MultiNimAdapter(BasePlatformAdapter):
         instance_name = requested_instance or routed_instance or self._default_instance_name
         if instance_name and instance_name in self._instances:
             return self._instances[instance_name], routed_chat_id if routed_instance else str(chat_id)
+        if requested_instance or routed_instance:
+            return None, routed_chat_id if routed_instance else str(chat_id)
         if self._default_instance_name and self._default_instance_name in self._instances:
             return self._instances[self._default_instance_name], str(chat_id)
         return None, str(chat_id)

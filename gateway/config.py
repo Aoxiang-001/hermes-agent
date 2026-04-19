@@ -256,8 +256,11 @@ def load_nim_instances(
     base_extra = dict(platform.extra or {})
     raw_instances = _coerce_nim_instances(base_extra.pop("instances", None))
     env_instances = env.get("NIM_INSTANCES")
+    legacy_env = dict(env)
     if env_instances is not None and env_instances.strip():
         raw_instances = _coerce_nim_instances(env_instances)
+        for key in ("NIM_CREDENTIALS", "NIM_APP_KEY", "NIM_ACCOUNT", "NIM_TOKEN", "NIM_HOME_CHANNEL"):
+            legacy_env.pop(key, None)
 
     instances: List[NimResolvedConfig] = []
     seen_names: set[str] = set()
@@ -279,7 +282,7 @@ def load_nim_instances(
         reply_to_mode=platform.reply_to_mode,
         extra=base_extra,
     )
-    legacy = load_nim_config(legacy_platform, env)
+    legacy = load_nim_config(legacy_platform, legacy_env)
     if legacy.configured():
         _append_instance(legacy)
 
@@ -1459,13 +1462,13 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             parsed_instances = _coerce_nim_instances(nim_instances)
             if parsed_instances:
                 extra["instances"] = parsed_instances
-        if nim_token:
+        if nim_token and not nim_instances:
             extra["nim_token"] = nim_token
-        if nim_app_key:
+        if nim_app_key and not nim_instances:
             extra["app_key"] = nim_app_key
-        if nim_account:
+        if nim_account and not nim_instances:
             extra["account"] = nim_account
-        if nim_secret:
+        if nim_secret and not nim_instances:
             extra["token"] = nim_secret
         nim_bridge_command = os.getenv("NIM_BRIDGE_COMMAND", "").strip()
         if nim_bridge_command:
