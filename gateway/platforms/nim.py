@@ -13,7 +13,10 @@ from gateway.config import (
     PlatformConfig,
     _default_nim_bridge_dir,
     _default_nim_bridge_command,
+    decode_nim_chat_id,
+    encode_nim_chat_id,
     load_nim_config,
+    load_nim_instances,
 )
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from gateway.platforms.nim_bridge import NodeBridgeProcess
@@ -63,7 +66,13 @@ def _ensure_bundled_nim_sdk(bridge_dir: Path) -> bool:
 
 
 def check_nim_requirements(config: PlatformConfig | None = None) -> bool:
-    resolved = load_nim_config(config or PlatformConfig(enabled=True))
+    instances = load_nim_instances(config or PlatformConfig(enabled=True))
+    if not instances:
+        return False
+    return any(_check_nim_instance_requirements(resolved) for resolved in instances)
+
+
+def _check_nim_instance_requirements(resolved: NimResolvedConfig) -> bool:
     command = list(resolved.bridge_command or [])
     if not command:
         return False
@@ -97,11 +106,14 @@ class NimAdapter(BasePlatformAdapter):
         config: PlatformConfig,
         *,
         bridge: NodeBridgeProcess | Any | None = None,
+        resolved: NimResolvedConfig | None = None,
+        event_sink: Any | None = None,
     ) -> None:
         super().__init__(config=config, platform=Platform.NIM)
-        self.resolved: NimResolvedConfig = load_nim_config(config)
+        self.resolved: NimResolvedConfig = resolved or load_nim_config(config)
         self._bridge = bridge or NodeBridgeProcess(self.resolved.bridge_command)
         self._chat_cache: dict[str, dict[str, str]] = {}
+        self._event_sink = event_sink
 
     async def connect(self) -> bool:
         if not self.resolved.configured():
@@ -122,12 +134,13 @@ class NimAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> SendResult:
-        session_type = self._infer_session_type(chat_id, metadata)
+        routed_chat_id = self._strip_route_prefix(chat_id)
+        session_type = self._infer_session_type(routed_chat_id, metadata)
         reply_to_id = reply_to or (metadata or {}).get("reply_to")
         result: dict[str, Any] | None = None
         for chunk in self._split_content(content):
             result = await self._bridge.send_text(
-                chat_id=chat_id,
+                chat_id=routed_chat_id,
                 text=chunk,
                 session_type=session_type,
                 reply_to=reply_to_id,
@@ -158,12 +171,13 @@ class NimAdapter(BasePlatformAdapter):
         return chunks
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
-        cached = self._chat_cache.get(chat_id)
+        routed_chat_id = self._strip_route_prefix(chat_id)
+        cached = self._chat_cache.get(routed_chat_id)
         if cached is not None:
             return dict(cached)
-        if chat_id.startswith("team:"):
-            return {"name": chat_id, "type": "group"}
-        return {"name": chat_id, "type": "dm"}
+        if routed_chat_id.startswith("team:"):
+            return {"name": routed_chat_id, "type": "group"}
+        return {"name": routed_chat_id, "type": "dm"}
 
     async def health(self) -> dict[str, Any]:
         return await self._bridge.health()
@@ -175,10 +189,14 @@ class NimAdapter(BasePlatformAdapter):
         if self._should_ignore(payload):
             return
         event = self._to_message_event(payload)
-        self._chat_cache[event.source.chat_id] = {
+        routed_chat_id = self._strip_route_prefix(event.source.chat_id)
+        self._chat_cache[routed_chat_id] = {
             "name": event.source.chat_name or event.source.chat_id,
             "type": event.source.chat_type,
         }
+        if self._event_sink is not None:
+            await self._event_sink(event)
+            return
         await self.handle_message(event)
 
     def _should_ignore(self, payload: dict[str, Any]) -> bool:
@@ -221,7 +239,8 @@ class NimAdapter(BasePlatformAdapter):
         sender_id = str(payload.get("sender_id") or "")
         target_id = str(payload.get("target_id") or "")
         chat_type = "dm" if session_type == "p2p" else "group"
-        chat_id = f"user:{sender_id}" if session_type == "p2p" else f"team:{target_id}"
+        raw_chat_id = f"user:{sender_id}" if session_type == "p2p" else f"team:{target_id}"
+        chat_id = self._apply_route_prefix(raw_chat_id)
         source = self.build_source(
             chat_id=chat_id,
             chat_type=chat_type,
@@ -254,6 +273,123 @@ class NimAdapter(BasePlatformAdapter):
             "file": MessageType.DOCUMENT,
         }
         return mapping.get(value, MessageType.TEXT)
+
+    def _apply_route_prefix(self, chat_id: str) -> str:
+        return encode_nim_chat_id(self.resolved.instance_name, chat_id) if self.resolved.route_prefix else chat_id
+
+    def _strip_route_prefix(self, chat_id: str) -> str:
+        if not self.resolved.route_prefix:
+            return str(chat_id)
+        instance_name, routed = decode_nim_chat_id(chat_id)
+        if instance_name == self.resolved.instance_name and routed:
+            return routed
+        return str(chat_id)
+
+
+class MultiNimAdapter(BasePlatformAdapter):
+    def __init__(
+        self,
+        config: PlatformConfig,
+        *,
+        resolved_instances: list[NimResolvedConfig] | None = None,
+        bridge_factory: Any | None = None,
+    ) -> None:
+        super().__init__(config=config, platform=Platform.NIM)
+        self._resolved_instances = resolved_instances or load_nim_instances(config)
+        self._bridge_factory = bridge_factory
+        self._instances: dict[str, NimAdapter] = {}
+        self._default_instance_name: str | None = None
+
+    async def connect(self) -> bool:
+        if not self._resolved_instances:
+            self._mark_disconnected()
+            return False
+
+        connected = 0
+        self._instances = {}
+        self._default_instance_name = None
+        for resolved in self._resolved_instances:
+            bridge = self._bridge_factory(resolved) if self._bridge_factory else None
+            adapter = NimAdapter(
+                self.config,
+                bridge=bridge,
+                resolved=resolved,
+                event_sink=self.handle_message,
+            )
+            try:
+                success = await adapter.connect()
+            except Exception:
+                logger.exception("[nim:%s] connect failed", resolved.instance_name)
+                continue
+            if not success:
+                continue
+            self._instances[resolved.instance_name] = adapter
+            if self._default_instance_name is None:
+                self._default_instance_name = resolved.instance_name
+            connected += 1
+
+        if connected:
+            self._mark_connected()
+            return True
+
+        self._mark_disconnected()
+        return False
+
+    async def disconnect(self) -> None:
+        for adapter in list(self._instances.values()):
+            try:
+                await adapter.disconnect()
+            except Exception:
+                logger.debug("[nim] failed to disconnect child adapter", exc_info=True)
+        self._instances.clear()
+        self._default_instance_name = None
+        self._mark_disconnected()
+
+    async def send(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> SendResult:
+        adapter, routed_chat_id = self._resolve_adapter(chat_id, metadata)
+        if adapter is None:
+            raise RuntimeError("NIM instance is unavailable for chat target")
+        return await adapter.send(routed_chat_id, content, reply_to=reply_to, metadata=metadata)
+
+    async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
+        adapter, routed_chat_id = self._resolve_adapter(chat_id, None)
+        if adapter is None:
+            return {"name": chat_id, "type": "dm"}
+        return await adapter.get_chat_info(routed_chat_id)
+
+    async def health(self) -> dict[str, Any]:
+        children = {}
+        for name, adapter in self._instances.items():
+            try:
+                children[name] = await adapter.health()
+            except Exception as exc:
+                children[name] = {"connected": False, "error": str(exc)}
+        return {
+            "connected": bool(self._instances),
+            "instances": children,
+        }
+
+    def _resolve_adapter(
+        self,
+        chat_id: str,
+        metadata: dict[str, Any] | None,
+    ) -> tuple[NimAdapter | None, str]:
+        requested_instance = None
+        if metadata:
+            requested_instance = str(metadata.get("nim_instance") or "").strip() or None
+        routed_instance, routed_chat_id = decode_nim_chat_id(chat_id)
+        instance_name = requested_instance or routed_instance or self._default_instance_name
+        if instance_name and instance_name in self._instances:
+            return self._instances[instance_name], routed_chat_id if routed_instance else str(chat_id)
+        if self._default_instance_name and self._default_instance_name in self._instances:
+            return self._instances[self._default_instance_name], str(chat_id)
+        return None, str(chat_id)
 
 
 PlatformAdapter = NimAdapter

@@ -7,6 +7,7 @@ from gateway.config import (
     _default_nim_bridge_command,
     _resolve_nim_bridge_command,
     load_nim_config,
+    load_nim_instances,
     parse_nim_token,
 )
 
@@ -69,6 +70,45 @@ class TestLoadNimConfig:
         assert _resolve_nim_bridge_command(None)[0] == "node"
         assert _resolve_nim_bridge_command(None)[1].endswith("gateway/platforms/nim_bridge_js/index.mjs")
 
+    def test_loads_multiple_instances_and_prefixes_chat_ids(self):
+        instances = load_nim_instances(
+            PlatformConfig(
+                enabled=True,
+                extra={
+                    "nim_token": "app|default-bot|secret-default",
+                    "instances": [
+                        {
+                            "instance_name": "work",
+                            "nim_token": "app|work-bot|secret-work",
+                            "home_channel": "user:42",
+                        }
+                    ],
+                },
+            )
+        )
+
+        assert [item.instance_name for item in instances] == ["default", "work"]
+        assert instances[0].route_prefix == "default/"
+        assert instances[1].route_prefix == "work/"
+        assert instances[1].home_channel == "work/user:42"
+
+    def test_env_instances_override_platform_instances(self):
+        instances = load_nim_instances(
+            PlatformConfig(
+                enabled=True,
+                extra={
+                    "instances": [
+                        {"instance_name": "stale", "nim_token": "app|stale|secret"},
+                    ],
+                },
+            ),
+            {
+                "NIM_INSTANCES": '[{"instance_name":"env","nim_token":"app|env|secret-env"}]',
+            },
+        )
+
+        assert [item.instance_name for item in instances] == ["env"]
+
 
 class TestConnectedPlatforms:
     def test_nim_recognized_via_config_extra(self):
@@ -82,3 +122,25 @@ class TestConnectedPlatforms:
         )
 
         assert Platform.NIM in config.get_connected_platforms()
+
+    def test_nim_home_channel_falls_back_to_first_instance(self):
+        config = GatewayConfig(
+            platforms={
+                Platform.NIM: PlatformConfig(
+                    enabled=True,
+                    extra={
+                        "instances": [
+                            {
+                                "instance_name": "work",
+                                "nim_token": "app|work|secret",
+                                "home_channel": "user:100",
+                            }
+                        ],
+                    },
+                ),
+            }
+        )
+
+        home = config.get_home_channel(Platform.NIM)
+        assert home is not None
+        assert home.chat_id == "user:100"

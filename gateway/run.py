@@ -2673,7 +2673,8 @@ class GatewayRunner:
             return WeixinAdapter(config)
 
         elif platform == Platform.NIM:
-            from gateway.platforms.nim import NimAdapter, check_nim_requirements
+            from gateway.platforms.nim import MultiNimAdapter, NimAdapter, check_nim_requirements
+            from gateway.config import load_nim_instances
             if not check_nim_requirements(config):
                 logger.warning(
                     "NIM: bridge runtime is unavailable. Hermes auto-installs the bundled "
@@ -2681,6 +2682,8 @@ class GatewayRunner:
                     "gateway/platforms/nim_bridge_js or override NIM_BRIDGE_COMMAND."
                 )
                 return None
+            if len(load_nim_instances(config)) > 1:
+                return MultiNimAdapter(config)
             return NimAdapter(config)
 
         elif platform == Platform.MATTERMOST:

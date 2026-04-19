@@ -3,8 +3,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from gateway.config import PlatformConfig
-from gateway.platforms.nim import NimAdapter, _ensure_bundled_nim_sdk, check_nim_requirements
+from gateway.config import PlatformConfig, load_nim_config, load_nim_instances
+from gateway.platforms.nim import MultiNimAdapter, NimAdapter, _ensure_bundled_nim_sdk, check_nim_requirements
 
 
 class FakeBridge:
@@ -194,6 +194,95 @@ async def test_group_message_requires_allowed_team_and_mention():
     event = adapter.handle_message.await_args.args[0]
     assert event.source.chat_id == "team:team-1"
     assert event.source.chat_type == "group"
+
+
+@pytest.mark.asyncio
+async def test_inbound_message_prefixes_chat_id_for_multi_instance():
+    bridge = FakeBridge()
+    resolved = load_nim_config(
+        PlatformConfig(
+            enabled=True,
+            extra={
+                "instance_name": "work",
+                "nim_token": "app|bot|secret",
+            },
+        )
+    )
+    resolved.route_prefix = "work/"
+    adapter = NimAdapter(
+        PlatformConfig(enabled=True, extra={"nim_token": "app|bot|secret"}),
+        bridge=bridge,
+        resolved=resolved,
+    )
+    adapter.handle_message = AsyncMock()
+
+    await adapter._on_bridge_event(
+        {
+            "event": "message",
+            "payload": {
+                "message_id": "m-3",
+                "session_type": "p2p",
+                "sender_id": "allowed-user",
+                "sender_name": "Allowed",
+                "text": "hello",
+                "message_type": "text",
+            },
+        }
+    )
+
+    event = adapter.handle_message.await_args.args[0]
+    assert event.source.chat_id == "work/user:allowed-user"
+
+
+@pytest.mark.asyncio
+async def test_multi_instance_routes_send_to_matching_bridge():
+    config = PlatformConfig(
+        enabled=True,
+        extra={
+            "nim_token": "app|default-bot|secret-default",
+            "instances": [
+                {
+                    "instance_name": "work",
+                    "nim_token": "app|work-bot|secret-work",
+                }
+            ],
+        },
+    )
+    instances = load_nim_instances(config)
+    bridges = {}
+
+    def bridge_factory(resolved):
+        bridge = FakeBridge()
+        bridges[resolved.instance_name] = bridge
+        return bridge
+
+    adapter = MultiNimAdapter(
+        config,
+        resolved_instances=instances,
+        bridge_factory=bridge_factory,
+    )
+
+    assert await adapter.connect() is True
+
+    await adapter.send("work/user:200", "hello work")
+    await adapter.send("user:300", "hello default")
+
+    assert bridges["work"].sent == [
+        {
+            "chat_id": "user:200",
+            "text": "hello work",
+            "session_type": "p2p",
+            "reply_to": None,
+        }
+    ]
+    assert bridges["default"].sent == [
+        {
+            "chat_id": "user:300",
+            "text": "hello default",
+            "session_type": "p2p",
+            "reply_to": None,
+        }
+    ]
 
 
 def test_check_nim_requirements_supports_explicit_command(tmp_path):

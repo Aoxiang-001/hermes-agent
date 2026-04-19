@@ -13,6 +13,7 @@ import os
 import json
 import shlex
 import shutil
+import re
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
@@ -83,6 +84,8 @@ class NimCredentials:
 class NimResolvedConfig:
     enabled: bool
     credentials: NimCredentials | None
+    instance_name: str = "default"
+    route_prefix: str | None = None
     allowed_users: List[str] = field(default_factory=list)
     allow_all_users: bool = False
     group_policy: str = "allowlist"
@@ -119,6 +122,38 @@ def parse_nim_token(value: Any) -> NimCredentials | None:
     if len(parts) != 3 or any(not part for part in parts):
         return None
     return NimCredentials(app_key=parts[0], account=parts[1], token=parts[2])
+
+
+def _normalize_nim_instance_name(value: Any, fallback: str = "default") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return fallback
+    normalized = re.sub(r"[^a-zA-Z0-9._-]+", "-", raw).strip("._-")
+    return normalized or fallback
+
+
+def encode_nim_chat_id(instance_name: str | None, chat_id: str) -> str:
+    raw_chat_id = str(chat_id or "").strip()
+    if not raw_chat_id:
+        return raw_chat_id
+    normalized = _normalize_nim_instance_name(instance_name or "", "")
+    if not normalized:
+        return raw_chat_id
+    prefix = f"{normalized}/"
+    return raw_chat_id if raw_chat_id.startswith(prefix) else f"{prefix}{raw_chat_id}"
+
+
+def decode_nim_chat_id(value: Any) -> tuple[str | None, str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None, ""
+    prefix, sep, remainder = raw.partition("/")
+    if not sep or not remainder:
+        return None, raw
+    normalized = _normalize_nim_instance_name(prefix, "")
+    if not normalized:
+        return None, raw
+    return normalized, remainder
 
 
 def _default_nim_bridge_dir() -> Path:
@@ -172,6 +207,8 @@ def load_nim_config(
             )
 
     return NimResolvedConfig(
+        instance_name=_normalize_nim_instance_name(extra.get("instance_name") or extra.get("name"), "default"),
+        route_prefix=None,
         enabled=platform.enabled,
         credentials=credentials,
         allowed_users=_parse_csv_list(extra.get("allowed_users") or env.get("NIM_ALLOWED_USERS")),
@@ -184,6 +221,97 @@ def load_nim_config(
         debug=_coerce_bool(extra.get("debug", env.get("NIM_DEBUG")), default=False),
         raw_extra=extra,
     )
+
+
+def _coerce_nim_instances(value: Any) -> List[Dict[str, Any]]:
+    if value is None:
+        return []
+    raw = value
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError as exc:
+            logger.warning("Ignoring invalid NIM_INSTANCES JSON: %s", exc)
+            return []
+    if not isinstance(raw, list):
+        logger.warning("Ignoring NIM instances config: expected a list, got %s", type(raw).__name__)
+        return []
+    instances: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            logger.warning("Ignoring NIM instance entry: expected a mapping, got %s", type(item).__name__)
+            continue
+        instances.append(dict(item))
+    return instances
+
+
+def load_nim_instances(
+    platform: "PlatformConfig",
+    environ: Dict[str, str] | None = None,
+) -> List[NimResolvedConfig]:
+    env = environ or dict(os.environ)
+    base_extra = dict(platform.extra or {})
+    raw_instances = _coerce_nim_instances(base_extra.pop("instances", None))
+    env_instances = env.get("NIM_INSTANCES")
+    if env_instances is not None and env_instances.strip():
+        raw_instances = _coerce_nim_instances(env_instances)
+
+    instances: List[NimResolvedConfig] = []
+    seen_names: set[str] = set()
+
+    def _append_instance(config_obj: NimResolvedConfig) -> None:
+        name = _normalize_nim_instance_name(config_obj.instance_name, "default")
+        if name in seen_names:
+            logger.warning("Ignoring duplicate NIM instance name: %s", name)
+            return
+        config_obj.instance_name = name
+        seen_names.add(name)
+        instances.append(config_obj)
+
+    legacy_platform = PlatformConfig(
+        enabled=platform.enabled,
+        token=platform.token,
+        api_key=platform.api_key,
+        home_channel=platform.home_channel,
+        reply_to_mode=platform.reply_to_mode,
+        extra=base_extra,
+    )
+    legacy = load_nim_config(legacy_platform, env)
+    if legacy.configured():
+        _append_instance(legacy)
+
+    for index, item in enumerate(raw_instances, start=1):
+        instance_extra = {**base_extra, **item}
+        if "instance_name" not in instance_extra and "name" not in instance_extra:
+            instance_extra["instance_name"] = f"nim{index}"
+        enabled = _coerce_bool(instance_extra.get("enabled"), default=platform.enabled)
+        instance_env = dict(env)
+        for key in ("NIM_CREDENTIALS", "NIM_APP_KEY", "NIM_ACCOUNT", "NIM_TOKEN", "NIM_HOME_CHANNEL"):
+            instance_env.pop(key, None)
+        instance_platform = PlatformConfig(
+            enabled=enabled,
+            token=platform.token,
+            api_key=platform.api_key,
+            home_channel=None,
+            reply_to_mode=platform.reply_to_mode,
+            extra=instance_extra,
+        )
+        resolved = load_nim_config(instance_platform, instance_env)
+        if not resolved.configured():
+            logger.warning("Ignoring unconfigured NIM instance entry: %s", instance_extra.get("instance_name") or instance_extra.get("name") or f"nim{index}")
+            continue
+        _append_instance(resolved)
+
+    multi_instance = len(instances) > 1
+    for item in instances:
+        item.route_prefix = f"{item.instance_name}/" if multi_instance else None
+        if item.route_prefix and item.home_channel:
+            item.home_channel = encode_nim_chat_id(item.instance_name, item.home_channel)
+
+    return instances
 
 
 @dataclass
@@ -439,7 +567,7 @@ class GatewayConfig:
             ):
                 connected.append(platform)
             # NIM uses bridge credentials from config.extra or env vars
-            elif platform == Platform.NIM and load_nim_config(config).configured():
+            elif platform == Platform.NIM and load_nim_instances(config):
                 connected.append(platform)
 
         return connected
@@ -447,8 +575,16 @@ class GatewayConfig:
     def get_home_channel(self, platform: Platform) -> Optional[HomeChannel]:
         """Get the home channel for a platform."""
         config = self.platforms.get(platform)
-        if config:
+        if config and config.home_channel:
             return config.home_channel
+        if platform == Platform.NIM and config:
+            for instance in load_nim_instances(config):
+                if instance.home_channel:
+                    return HomeChannel(
+                        platform=Platform.NIM,
+                        chat_id=instance.home_channel,
+                        name=f"NIM {instance.instance_name}",
+                    )
         return None
     
     def get_reset_policy(
@@ -1310,14 +1446,19 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
 
     # NIM
     nim_token = os.getenv("NIM_CREDENTIALS")
+    nim_instances = os.getenv("NIM_INSTANCES", "").strip()
     nim_app_key = os.getenv("NIM_APP_KEY")
     nim_account = os.getenv("NIM_ACCOUNT")
     nim_secret = os.getenv("NIM_TOKEN")
-    if nim_token or (nim_app_key and nim_account and nim_secret):
+    if nim_token or nim_instances or (nim_app_key and nim_account and nim_secret):
         if Platform.NIM not in config.platforms:
             config.platforms[Platform.NIM] = PlatformConfig()
         config.platforms[Platform.NIM].enabled = True
         extra = config.platforms[Platform.NIM].extra
+        if nim_instances:
+            parsed_instances = _coerce_nim_instances(nim_instances)
+            if parsed_instances:
+                extra["instances"] = parsed_instances
         if nim_token:
             extra["nim_token"] = nim_token
         if nim_app_key:

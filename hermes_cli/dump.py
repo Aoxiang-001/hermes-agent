@@ -114,6 +114,8 @@ def _configured_platforms() -> list[str]:
         "qqbot": "QQ_APP_ID",
     }
     configured = [name for name, env in checks.items() if os.getenv(env)]
+    if "nim" not in configured and os.getenv("NIM_INSTANCES", "").strip():
+        configured.append("nim")
     if "nim" not in configured and all(os.getenv(var, "") for var in ("NIM_APP_KEY", "NIM_ACCOUNT", "NIM_TOKEN")):
         configured.append("nim")
     return configured

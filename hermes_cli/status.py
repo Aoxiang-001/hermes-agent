@@ -324,7 +324,9 @@ def show_status(args):
     for name, (token_var, home_var) in platforms.items():
         token = os.getenv(token_var, "")
         if name == "NIM" and not token:
-            if all(os.getenv(var, "") for var in ("NIM_APP_KEY", "NIM_ACCOUNT", "NIM_TOKEN")):
+            if os.getenv("NIM_INSTANCES", "").strip():
+                token = "configured"
+            elif all(os.getenv(var, "") for var in ("NIM_APP_KEY", "NIM_ACCOUNT", "NIM_TOKEN")):
                 token = "configured"
         has_token = bool(token)
         
