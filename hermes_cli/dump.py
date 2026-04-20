@@ -94,6 +94,7 @@ def _cron_summary(hermes_home: Path) -> str:
 
 def _configured_platforms() -> list[str]:
     """Return list of configured messaging platform names."""
+    config = load_config()
     checks = {
         "telegram": "TELEGRAM_BOT_TOKEN",
         "discord": "DISCORD_BOT_TOKEN",
@@ -114,6 +115,10 @@ def _configured_platforms() -> list[str]:
         "qqbot": "QQ_APP_ID",
     }
     configured = [name for name, env in checks.items() if os.getenv(env)]
+    nim_cfg = config.get("nim", {})
+    nim_instances = nim_cfg.get("instances", []) if isinstance(nim_cfg, dict) else []
+    if "nim" not in configured and isinstance(nim_instances, list) and any(isinstance(item, dict) for item in nim_instances):
+        configured.append("nim")
     if "nim" not in configured and os.getenv("NIM_INSTANCES", "").strip():
         configured.append("nim")
     if "nim" not in configured and all(os.getenv(var, "") for var in ("NIM_APP_KEY", "NIM_ACCOUNT", "NIM_TOKEN")):

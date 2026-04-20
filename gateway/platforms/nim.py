@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
 import shutil
 from pathlib import Path
 from typing import Any, Optional
+
+from nim_bot_py.bridge import NimBridgeError
+from nim_bot_py.bridge import NodeBridge as PackagedNodeBridge
 
 from gateway.config import (
     NimResolvedConfig,
     Platform,
     PlatformConfig,
-    _default_nim_bridge_dir,
     _default_nim_bridge_command,
     decode_nim_chat_id,
     encode_nim_chat_id,
@@ -22,47 +23,6 @@ from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageTyp
 from gateway.platforms.nim_bridge import NodeBridgeProcess
 
 logger = logging.getLogger(__name__)
-
-
-def _bundled_nim_sdk_dir(bridge_dir: Path) -> Path:
-    return bridge_dir / "node_modules" / "@yxim" / "nim-bot"
-
-
-def _ensure_bundled_nim_sdk(bridge_dir: Path) -> bool:
-    bridge_script = bridge_dir / "index.mjs"
-    package_json = bridge_dir / "package.json"
-    sdk_dir = _bundled_nim_sdk_dir(bridge_dir)
-    if not bridge_script.exists() or not package_json.exists():
-        return False
-    if sdk_dir.exists():
-        return True
-
-    npm = shutil.which("npm")
-    if not npm:
-        logger.warning("[nim] npm not found; cannot auto-install bundled @yxim/nim-bot")
-        return False
-
-    logger.info("[nim] Installing bundled @yxim/nim-bot dependency in %s", bridge_dir)
-    try:
-        result = subprocess.run(
-            [npm, "install", "--no-fund", "--no-audit", "--prefix", str(bridge_dir)],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        if result.stdout:
-            logger.debug("[nim] npm install stdout: %s", result.stdout.strip())
-        if result.stderr:
-            logger.debug("[nim] npm install stderr: %s", result.stderr.strip())
-    except (OSError, subprocess.CalledProcessError) as exc:
-        if isinstance(exc, subprocess.CalledProcessError):
-            stderr = (exc.stderr or "").strip()
-            logger.warning("[nim] Failed to auto-install @yxim/nim-bot: %s", stderr or exc)
-        else:
-            logger.warning("[nim] Failed to launch npm for bundled @yxim/nim-bot install: %s", exc)
-        return False
-
-    return sdk_dir.exists()
 
 
 def check_nim_requirements(config: PlatformConfig | None = None) -> bool:
@@ -86,11 +46,12 @@ def _check_nim_instance_requirements(resolved: NimResolvedConfig) -> bool:
 
     default_command = _default_nim_bridge_command()
     if command == default_command:
-        bridge_dir = _default_nim_bridge_dir()
-        bridge_script = bridge_dir / "index.mjs"
-        if not bridge_script.exists():
+        try:
+            PackagedNodeBridge(command=command).ensure_runtime()
+        except NimBridgeError as exc:
+            logger.warning("[nim] nim-bot-py runtime is unavailable: %s", exc)
             return False
-        return _ensure_bundled_nim_sdk(bridge_dir)
+        return True
 
     if len(command) >= 2 and executable.endswith("node"):
         return Path(command[1]).exists()
@@ -152,22 +113,23 @@ class NimAdapter(BasePlatformAdapter):
         )
 
     def _split_content(self, content: str) -> list[str]:
-        if len(content) <= self.MAX_MESSAGE_LENGTH:
+        chunk_limit = max(1, int(self.resolved.text_chunk_limit or self.MAX_MESSAGE_LENGTH))
+        if len(content) <= chunk_limit:
             return [content]
 
         chunks: list[str] = []
         remaining = content
         while remaining:
-            if len(remaining) <= self.MAX_MESSAGE_LENGTH:
+            if len(remaining) <= chunk_limit:
                 chunks.append(remaining)
                 break
-            split_at = remaining.rfind("\n", 0, self.MAX_MESSAGE_LENGTH)
+            split_at = remaining.rfind("\n", 0, chunk_limit)
             if split_at > 0:
                 chunks.append(remaining[:split_at + 1])
                 remaining = remaining[split_at + 1 :]
                 continue
-            chunks.append(remaining[: self.MAX_MESSAGE_LENGTH])
-            remaining = remaining[self.MAX_MESSAGE_LENGTH :]
+            chunks.append(remaining[:chunk_limit])
+            remaining = remaining[chunk_limit:]
         return chunks
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
@@ -175,7 +137,7 @@ class NimAdapter(BasePlatformAdapter):
         cached = self._chat_cache.get(routed_chat_id)
         if cached is not None:
             return dict(cached)
-        if routed_chat_id.startswith("team:"):
+        if routed_chat_id.startswith(("team:", "superTeam:", "qchat:")):
             return {"name": routed_chat_id, "type": "group"}
         return {"name": routed_chat_id, "type": "dm"}
 
@@ -186,7 +148,9 @@ class NimAdapter(BasePlatformAdapter):
         if envelope.get("event") != "message":
             return
         payload = dict(envelope.get("payload") or {})
-        if self._should_ignore(payload):
+        ignore_reason = self._ignore_reason(payload)
+        self._log_inbound_debug(payload, ignore_reason)
+        if ignore_reason is not None:
             return
         event = self._to_message_event(payload)
         routed_chat_id = self._strip_route_prefix(event.source.chat_id)
@@ -199,33 +163,133 @@ class NimAdapter(BasePlatformAdapter):
             return
         await self.handle_message(event)
 
-    def _should_ignore(self, payload: dict[str, Any]) -> bool:
+    def _ignore_reason(self, payload: dict[str, Any]) -> str | None:
         if payload.get("from_self"):
-            return True
+            return "self_message"
         session_type = str(payload.get("session_type") or "p2p")
         sender_id = str(payload.get("sender_id") or "")
         if session_type == "p2p":
-            return not self._is_allowed_direct_sender(sender_id)
+            if not self._is_allowed_direct_sender(sender_id):
+                return "dm_sender_not_allowed"
+            return None
         if session_type in {"team", "superTeam"}:
-            if not self._is_allowed_group(str(payload.get("target_id") or "")):
-                return True
-            return not self._is_mentioned(payload)
-        return True
+            if not self._is_allowed_team_message(
+                group_id=str(payload.get("target_id") or ""),
+                sender_id=sender_id,
+                session_type=session_type,
+            ):
+                return "group_not_allowed"
+            if not self._is_mentioned(payload):
+                return "group_not_mentioned"
+            return None
+        if session_type == "qchat":
+            if not self._is_allowed_qchat_message(
+                server_id=str(payload.get("server_id") or ""),
+                channel_id=str(payload.get("channel_id") or ""),
+                sender_id=sender_id,
+            ):
+                return "qchat_not_allowed"
+            if not self._is_mentioned(payload):
+                return "qchat_not_mentioned"
+            return None
+        return f"unsupported_session_type:{session_type}"
+
+    def _log_inbound_debug(self, payload: dict[str, Any], ignore_reason: str | None) -> None:
+        if not self.resolved.debug:
+            return
+        session_type = str(payload.get("session_type") or "p2p")
+        if session_type == "p2p" and ignore_reason is None:
+            return
+        force_push_ids = [str(item) for item in payload.get("force_push_account_ids") or []]
+        logger.info(
+            "[nim:%s] inbound debug session_type=%s sender=%s target=%s mentioned=%s mention_all=%s "
+            "force_push_ids=%s ignore_reason=%s text=%r",
+            self.resolved.instance_name,
+            session_type,
+            str(payload.get("sender_id") or ""),
+            str(payload.get("target_id") or ""),
+            bool(payload.get("mentioned")),
+            bool(payload.get("mention_all")),
+            force_push_ids,
+            ignore_reason or "accepted",
+            str(payload.get("text") or "")[:200],
+        )
 
     def _is_allowed_direct_sender(self, sender_id: str) -> bool:
-        if self.resolved.allow_all_users:
-            return True
-        if not self.resolved.allowed_users:
-            return True
-        return sender_id in self.resolved.allowed_users
-
-    def _is_allowed_group(self, target_id: str) -> bool:
-        policy = self.resolved.group_policy
+        policy = self.resolved.p2p_policy
         if policy == "disabled":
             return False
         if policy == "open":
             return True
-        return target_id in self.resolved.group_allowlist
+        if not self.resolved.p2p_allow_from:
+            return False
+        normalized_sender = sender_id.lower()
+        return any(entry.lower() == normalized_sender for entry in self.resolved.p2p_allow_from)
+
+    def _is_allowed_team_message(self, *, group_id: str, sender_id: str, session_type: str) -> bool:
+        policy = self.resolved.team_policy
+        if policy == "disabled":
+            return False
+        if policy == "open":
+            return True
+        if not self.resolved.team_allow_from:
+            return False
+
+        normalized_group = group_id.lower()
+        normalized_sender = sender_id.lower()
+        normalized_type = "superTeam" if session_type == "superTeam" else "team"
+
+        for raw_entry in self.resolved.team_allow_from:
+            parts = [part.strip() for part in str(raw_entry).split("|")]
+            first = (parts[0] if parts else "").lower()
+            entry_type: str | None = None
+
+            if first in {"1", "2"}:
+                entry_type = "team" if first == "1" else "superTeam"
+                entry_group = (parts[1] if len(parts) > 1 else "").strip().lower()
+                entry_sender = (parts[2] if len(parts) > 2 else "").strip().lower()
+            else:
+                entry_group = first
+                entry_sender = (parts[1] if len(parts) > 1 else "").strip().lower()
+
+            if entry_type is not None and normalized_type != entry_type:
+                continue
+            if entry_group != normalized_group:
+                continue
+            if entry_sender and entry_sender != normalized_sender:
+                continue
+            return True
+
+        return False
+
+    def _is_allowed_qchat_message(self, *, server_id: str, channel_id: str, sender_id: str) -> bool:
+        policy = self.resolved.qchat_policy
+        if policy == "disabled":
+            return False
+        if policy == "open":
+            return True
+        if not self.resolved.qchat_allow_from:
+            return False
+
+        normalized_server = server_id.lower()
+        normalized_channel = channel_id.lower()
+        normalized_sender = sender_id.lower()
+
+        for raw_entry in self.resolved.qchat_allow_from:
+            parts = [part.strip() for part in str(raw_entry).split("|")]
+            entry_server = (parts[0] if parts else "").lower()
+            entry_channel = (parts[1] if len(parts) > 1 else "").strip().lower()
+            entry_sender = (parts[2] if len(parts) > 2 else "").strip().lower()
+
+            if entry_server != normalized_server:
+                continue
+            if entry_channel and entry_channel != normalized_channel:
+                continue
+            if entry_sender and entry_sender != normalized_sender:
+                continue
+            return True
+
+        return False
 
     def _is_mentioned(self, payload: dict[str, Any]) -> bool:
         if payload.get("mentioned") or payload.get("mention_all"):
@@ -239,7 +303,17 @@ class NimAdapter(BasePlatformAdapter):
         sender_id = str(payload.get("sender_id") or "")
         target_id = str(payload.get("target_id") or "")
         chat_type = "dm" if session_type == "p2p" else "group"
-        raw_chat_id = f"user:{sender_id}" if session_type == "p2p" else f"team:{target_id}"
+        if session_type == "p2p":
+            raw_chat_id = f"user:{sender_id}"
+        elif session_type == "qchat":
+            server_id = str(payload.get("server_id") or "")
+            channel_id = str(payload.get("channel_id") or "")
+            target = target_id or f"{server_id}:{channel_id}".strip(":")
+            raw_chat_id = f"qchat:{target}"
+        elif session_type == "superTeam":
+            raw_chat_id = f"superTeam:{target_id}"
+        else:
+            raw_chat_id = f"team:{target_id}"
         chat_id = self._apply_route_prefix(raw_chat_id)
         source = self.build_source(
             chat_id=chat_id,
@@ -260,6 +334,10 @@ class NimAdapter(BasePlatformAdapter):
     def _infer_session_type(self, chat_id: str, metadata: dict[str, Any] | None) -> str:
         if metadata and metadata.get("session_type"):
             return str(metadata["session_type"])
+        if chat_id.startswith("qchat:"):
+            return "qchat"
+        if chat_id.startswith("superTeam:"):
+            return "superTeam"
         if chat_id.startswith("team:"):
             return "team"
         return "p2p"

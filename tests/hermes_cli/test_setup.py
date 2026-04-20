@@ -223,6 +223,148 @@ def test_setup_gateway_in_container_shows_docker_guidance(monkeypatch, capsys):
     assert "restart" in out.lower()
 
 
+def test_gateway_platforms_include_nim():
+    names = [name for name, _env_var, _setup in setup_mod._GATEWAY_PLATFORMS]
+    assert "NIM (NetEase IM)" in names
+
+
+def test_setup_gateway_marks_nim_configured_with_explicit_fields(monkeypatch):
+    env = {
+        "NIM_CREDENTIALS": "",
+        "NIM_INSTANCES": "",
+        "NIM_APP_KEY": "app-key",
+        "NIM_ACCOUNT": "bot-account",
+        "NIM_TOKEN": "bot-token",
+    }
+
+    monkeypatch.setattr(setup_mod, "get_env_value", lambda key: env.get(key, ""))
+    monkeypatch.setattr(setup_mod, "prompt_checklist", lambda *_args, **_kwargs: [])
+
+    captured = {}
+
+    def _capture(_question, items, pre_selected=None):
+        captured["items"] = items
+        captured["pre_selected"] = pre_selected or []
+        return []
+
+    monkeypatch.setattr(setup_mod, "prompt_checklist", _capture)
+    setup_mod.setup_gateway({})
+
+    nim_index = captured["items"].index("NIM (NetEase IM)  (configured)")
+    assert nim_index in captured["pre_selected"]
+
+
+def test_setup_gateway_marks_nim_configured_with_instances(monkeypatch):
+    env = {
+        "NIM_CREDENTIALS": "",
+        "NIM_INSTANCES": '[{"instance_name":"work","nim_token":"app|bot|secret"}]',
+    }
+
+    monkeypatch.setattr(setup_mod, "get_env_value", lambda key: env.get(key, ""))
+
+    captured = {}
+
+    def _capture(_question, items, pre_selected=None):
+        captured["items"] = items
+        captured["pre_selected"] = pre_selected or []
+        return []
+
+    monkeypatch.setattr(setup_mod, "prompt_checklist", _capture)
+    setup_mod.setup_gateway({})
+
+    nim_index = captured["items"].index("NIM (NetEase IM)  (configured)")
+    assert nim_index in captured["pre_selected"]
+
+
+def test_setup_gateway_marks_nim_configured_from_config_yaml(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    config = load_config()
+    config["nim"] = {
+        "instances": [
+            {
+                "enabled": True,
+                "nimToken": "app|bot|secret",
+                "p2p": {"policy": "open"},
+            }
+        ]
+    }
+    save_config(config)
+
+    monkeypatch.setattr(setup_mod, "get_env_value", lambda _key: "")
+
+    captured = {}
+
+    def _capture(_question, items, pre_selected=None):
+        captured["items"] = items
+        captured["pre_selected"] = pre_selected or []
+        return []
+
+    monkeypatch.setattr(setup_mod, "prompt_checklist", _capture)
+    setup_mod.setup_gateway(load_config())
+
+    nim_index = captured["items"].index("NIM (NetEase IM)  (configured)")
+    assert nim_index in captured["pre_selected"]
+
+
+def test_setup_nim_compact_credentials_sets_open_defaults(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    monkeypatch.setattr(
+        setup_mod,
+        "prompt",
+        lambda *_args, **_kwargs: "app-key|bot-account|bot-token",
+    )
+    monkeypatch.setattr(setup_mod, "prompt_yes_no", lambda *_args, **_kwargs: False)
+
+    setup_mod._setup_nim()
+
+    saved = load_config()
+    assert saved["nim"]["instances"] == [
+        {
+            "enabled": True,
+            "nimToken": "app-key|bot-account|bot-token",
+            "p2p": {"policy": "open", "allowFrom": []},
+            "team": {"policy": "open", "allowFrom": []},
+            "qchat": {"policy": "open", "allowFrom": []},
+            "advanced": {
+                "mediaMaxMb": 30,
+                "textChunkLimit": 4000,
+                "debug": False,
+            },
+        }
+    ]
+    assert setup_mod.get_env_value("NIM_CREDENTIALS") == ""
+    assert setup_mod.get_env_value("NIM_INSTANCES") == ""
+    assert setup_mod.get_env_value("NIM_APP_KEY") == ""
+    assert setup_mod.get_env_value("NIM_ACCOUNT") == ""
+    assert setup_mod.get_env_value("NIM_TOKEN") == ""
+    assert setup_mod.get_env_value("NIM_ALLOWED_USERS") == ""
+    assert setup_mod.get_env_value("NIM_ALLOW_ALL_USERS") == "true"
+    assert setup_mod.get_env_value("NIM_GROUP_POLICY") == "open"
+    assert setup_mod.get_env_value("NIM_GROUP_ALLOWLIST") == ""
+
+
+def test_gateway_summary_includes_nim_from_config_yaml(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(setup_mod, "get_env_value", lambda _key: "")
+
+    config = load_config()
+    config["nim"] = {
+        "instances": [
+            {
+                "enabled": True,
+                "nimToken": "app|bot|secret",
+            }
+        ]
+    }
+    save_config(config)
+
+    summary = setup_mod._get_section_config_summary(load_config(), "gateway")
+
+    assert summary == "NIM"
+
+
 def test_setup_syncs_custom_provider_removal_from_disk(tmp_path, monkeypatch):
     """Removing the last custom provider in model setup should persist."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))

@@ -1,7 +1,65 @@
+import { useEffect, useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectOption } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+
+function isJsonStructuredArray(value: unknown): value is unknown[] {
+  return Array.isArray(value) && value.some((item) => typeof item === "object" && item !== null);
+}
+
+function shouldRenderListAsJson(schemaKey: string, value: unknown): value is unknown[] {
+  return schemaKey === "nim.instances" || isJsonStructuredArray(value);
+}
+
+function stringifyJson(value: unknown): string {
+  return JSON.stringify(value ?? null, null, 2);
+}
+
+function JsonEditor({
+  label,
+  schema,
+  schemaKey,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string;
+  schema: Record<string, unknown>;
+  schemaKey: string;
+  value: unknown;
+  onChange: (v: unknown) => void;
+  placeholder: string;
+}) {
+  const serialized = stringifyJson(value);
+  const [draft, setDraft] = useState(serialized);
+
+  useEffect(() => {
+    setDraft(serialized);
+  }, [serialized]);
+
+  return (
+    <div className="grid gap-1.5">
+      <Label className="text-sm">{label}</Label>
+      <FieldHint schema={schema} schemaKey={schemaKey} />
+      <textarea
+        className="flex min-h-[160px] w-full border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        value={draft}
+        onChange={(e) => {
+          const next = e.target.value;
+          setDraft(next);
+          try {
+            onChange(JSON.parse(next));
+          } catch {
+            // Preserve in-progress JSON edits locally until the content is valid.
+          }
+        }}
+        placeholder={placeholder}
+        spellCheck={false}
+      />
+    </div>
+  );
+}
 
 function FieldHint({ schema, schemaKey }: { schema: Record<string, unknown>; schemaKey: string }) {
   const keyPath = schemaKey.includes(".") ? schemaKey : "";
@@ -94,6 +152,19 @@ export function AutoField({
   }
 
   if (schema.type === "list") {
+    if (shouldRenderListAsJson(schemaKey, value)) {
+      return (
+        <JsonEditor
+          label={label}
+          schema={schema}
+          schemaKey={schemaKey}
+          value={Array.isArray(value) ? value : []}
+          onChange={onChange}
+          placeholder="JSON array"
+        />
+      );
+    }
+
     return (
       <div className="grid gap-1.5">
         <Label className="text-sm">{label}</Label>
@@ -115,22 +186,15 @@ export function AutoField({
   }
 
   if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-    const obj = value as Record<string, unknown>;
     return (
-      <div className="grid gap-3 border border-border p-3">
-        <Label className="text-xs font-medium">{label}</Label>
-        <FieldHint schema={schema} schemaKey={schemaKey} />
-        {Object.entries(obj).map(([subKey, subVal]) => (
-          <div key={subKey} className="grid gap-1">
-            <Label className="text-xs text-muted-foreground">{subKey}</Label>
-            <Input
-              value={String(subVal ?? "")}
-              onChange={(e) => onChange({ ...obj, [subKey]: e.target.value })}
-              className="text-xs"
-            />
-          </div>
-        ))}
-      </div>
+      <JsonEditor
+        label={label}
+        schema={schema}
+        schemaKey={schemaKey}
+        value={value}
+        onChange={onChange}
+        placeholder="JSON object"
+      />
     );
   }
 

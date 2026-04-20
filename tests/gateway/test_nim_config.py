@@ -34,8 +34,15 @@ class TestLoadNimConfig:
             PlatformConfig(
                 enabled=True,
                 extra={
-                    "nim_token": "from-token|bot|secret",
-                    "bridge_command": "node /tmp/nim/index.mjs --stdio",
+                    "nimToken": "from-token|bot|secret",
+                    "p2p": {"policy": "allowlist", "allowFrom": ["alice", "bob"]},
+                    "team": {"policy": "allowlist", "allowFrom": ["team-a", "1|team-b|alice"]},
+                    "qchat": {"policy": "allowlist", "allowFrom": ["server-1|channel-9|alice"]},
+                    "advanced": {
+                        "mediaMaxMb": 64,
+                        "textChunkLimit": 2048,
+                        "debug": True,
+                    },
                 },
             )
         )
@@ -43,7 +50,16 @@ class TestLoadNimConfig:
         assert resolved.configured() is True
         assert resolved.credentials is not None
         assert resolved.credentials.app_key == "from-token"
-        assert resolved.bridge_command == ["node", "/tmp/nim/index.mjs", "--stdio"]
+        assert resolved.bridge_command == _default_nim_bridge_command()
+        assert resolved.p2p_policy == "allowlist"
+        assert resolved.p2p_allow_from == ["alice", "bob"]
+        assert resolved.team_policy == "allowlist"
+        assert resolved.team_allow_from == ["team-a", "1|team-b|alice"]
+        assert resolved.qchat_policy == "allowlist"
+        assert resolved.qchat_allow_from == ["server-1|channel-9|alice"]
+        assert resolved.media_max_mb == 64
+        assert resolved.text_chunk_limit == 2048
+        assert resolved.debug is True
 
     def test_loads_from_env_triplet(self):
         resolved = load_nim_config(
@@ -65,10 +81,38 @@ class TestLoadNimConfig:
         assert resolved.group_policy == "open"
         assert resolved.allow_all_users is True
 
+    def test_compact_credentials_default_to_open_access(self):
+        resolved = load_nim_config(
+            PlatformConfig(enabled=True),
+            {
+                "NIM_CREDENTIALS": "app|bot|secret",
+            },
+        )
+
+        assert resolved.configured() is True
+        assert resolved.credentials is not None
+        assert resolved.allow_all_users is True
+        assert resolved.group_policy == "open"
+        assert resolved.group_allowlist == []
+
     def test_default_bridge_command_uses_bundled_node_script(self):
         assert _resolve_nim_bridge_command(None) == _default_nim_bridge_command()
         assert _resolve_nim_bridge_command(None)[0] == "node"
-        assert _resolve_nim_bridge_command(None)[1].endswith("gateway/platforms/nim_bridge_js/index.mjs")
+        assert "nim_bot_py/bridge_js/index.mjs" in _resolve_nim_bridge_command(None)[1]
+
+    def test_load_config_ignores_legacy_bridge_override(self):
+        resolved = load_nim_config(
+            PlatformConfig(
+                enabled=True,
+                extra={
+                    "nim_token": "app|bot|secret",
+                    "bridge_command": ["node", "/tmp/custom/index.mjs"],
+                },
+            ),
+            {"NIM_BRIDGE_COMMAND": "node /tmp/ignored/index.mjs"},
+        )
+
+        assert resolved.bridge_command == _default_nim_bridge_command()
 
     def test_loads_multiple_instances_and_prefixes_chat_ids(self):
         instances = load_nim_instances(
@@ -78,8 +122,7 @@ class TestLoadNimConfig:
                     "nim_token": "app|default-bot|secret-default",
                     "instances": [
                         {
-                            "instance_name": "work",
-                            "nim_token": "app|work-bot|secret-work",
+                            "nimToken": "app|work-bot|secret-work",
                             "home_channel": "user:42",
                         }
                     ],
@@ -87,10 +130,10 @@ class TestLoadNimConfig:
             )
         )
 
-        assert [item.instance_name for item in instances] == ["default", "work"]
+        assert [item.instance_name for item in instances] == ["default", "work-bot"]
         assert instances[0].route_prefix == "default/"
-        assert instances[1].route_prefix == "work/"
-        assert instances[1].home_channel == "work/user:42"
+        assert instances[1].route_prefix == "work-bot/"
+        assert instances[1].home_channel == "work-bot/user:42"
 
     def test_env_instances_override_platform_instances(self):
         instances = load_nim_instances(
@@ -98,12 +141,12 @@ class TestLoadNimConfig:
                 enabled=True,
                 extra={
                     "instances": [
-                        {"instance_name": "stale", "nim_token": "app|stale|secret"},
+                        {"instance_name": "stale", "nimToken": "app|stale|secret"},
                     ],
                 },
             ),
             {
-                "NIM_INSTANCES": '[{"instance_name":"env","nim_token":"app|env|secret-env"}]',
+                "NIM_INSTANCES": '[{"instance_name":"env","nimToken":"app|env|secret-env"}]',
             },
         )
 
@@ -114,7 +157,7 @@ class TestLoadNimConfig:
             PlatformConfig(enabled=True),
             {
                 "NIM_CREDENTIALS": "app|legacy|secret-legacy",
-                "NIM_INSTANCES": '[{"instance_name":"main","nim_token":"app|env|secret-env"}]',
+                "NIM_INSTANCES": '[{"instance_name":"main","nimToken":"app|env|secret-env"}]',
             },
         )
 

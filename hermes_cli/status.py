@@ -320,11 +320,17 @@ def show_status(args):
         "BlueBubbles": ("BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_HOME_CHANNEL"),
         "QQBot": ("QQ_APP_ID", "QQBOT_HOME_CHANNEL"),
     }
+    raw_config = load_config()
+    nim_cfg = raw_config.get("nim", {})
+    nim_instances = nim_cfg.get("instances", []) if isinstance(nim_cfg, dict) else []
+    nim_from_config = isinstance(nim_instances, list) and any(isinstance(item, dict) for item in nim_instances)
     
     for name, (token_var, home_var) in platforms.items():
         token = os.getenv(token_var, "")
         if name == "NIM" and not token:
-            if os.getenv("NIM_INSTANCES", "").strip():
+            if nim_from_config:
+                token = "configured"
+            elif os.getenv("NIM_INSTANCES", "").strip():
                 token = "configured"
             elif all(os.getenv(var, "") for var in ("NIM_APP_KEY", "NIM_ACCOUNT", "NIM_TOKEN")):
                 token = "configured"

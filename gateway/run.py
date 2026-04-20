@@ -1836,6 +1836,18 @@ class GatewayRunner:
                        "BLUEBUBBLES_ALLOW_ALL_USERS",
                        "QQ_ALLOW_ALL_USERS")
         )
+        try:
+            from gateway.config import load_nim_instances
+
+            nim_platform = self.config.platforms.get(Platform.NIM)
+            if nim_platform is not None:
+                nim_instances = load_nim_instances(nim_platform)
+                if any(instance.p2p_allow_from for instance in nim_instances):
+                    _any_allowlist = True
+                if any(instance.p2p_policy == "open" for instance in nim_instances):
+                    _allow_all = True
+        except Exception:
+            pass
         if not _any_allowlist and not _allow_all:
             logger.warning(
                 "No user allowlists configured. All unauthorized users will be denied. "
@@ -2678,9 +2690,9 @@ class GatewayRunner:
             nim_instances = load_nim_instances(config)
             if not check_nim_requirements(config):
                 logger.warning(
-                    "NIM: bridge runtime is unavailable. Hermes auto-installs the bundled "
-                    "@yxim/nim-bot when npm is available; otherwise install it under "
-                    "gateway/platforms/nim_bridge_js or override NIM_BRIDGE_COMMAND."
+                    "NIM: bridge runtime is unavailable. Hermes now uses nim-bot-py for "
+                    "the default NIM bridge; install nim-bot-py and ensure node/npm are "
+                    "available."
                 )
                 return None
             has_explicit_instances = bool(

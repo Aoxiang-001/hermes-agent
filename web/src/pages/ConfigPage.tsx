@@ -58,6 +58,7 @@ const CATEGORY_ICONS: Record<string, React.ComponentType<{ className?: string }>
   stt: Ear,
   logging: ClipboardList,
   discord: MessageCircle,
+  nim: MessageCircle,
   auxiliary: Wrench,
 };
 

@@ -212,6 +212,7 @@ export const zh: Translations = {
       stt: "语音转文字",
       logging: "日志",
       discord: "Discord",
+      nim: "云信IM",
       auxiliary: "辅助",
     },
   },

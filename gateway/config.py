@@ -86,14 +86,22 @@ class NimResolvedConfig:
     credentials: NimCredentials | None
     instance_name: str = "default"
     route_prefix: str | None = None
+    p2p_policy: str = "open"
+    p2p_allow_from: List[str] = field(default_factory=list)
+    team_policy: str = "open"
+    team_allow_from: List[str] = field(default_factory=list)
+    qchat_policy: str = "open"
+    qchat_allow_from: List[str] = field(default_factory=list)
     allowed_users: List[str] = field(default_factory=list)
-    allow_all_users: bool = False
-    group_policy: str = "allowlist"
+    allow_all_users: bool = True
+    group_policy: str = "open"
     group_allowlist: List[str] = field(default_factory=list)
     home_channel: str | None = None
     bridge_command: List[str] = field(default_factory=list)
     media_max_mb: int = 30
+    text_chunk_limit: int = 4000
     debug: bool = False
+    advanced: Dict[str, Any] = field(default_factory=dict)
     raw_extra: Dict[str, Any] = field(default_factory=dict)
 
     def configured(self) -> bool:
@@ -110,7 +118,9 @@ class NimResolvedConfig:
             },
             "debug": self.debug,
             "media_max_mb": self.media_max_mb,
+            "text_chunk_limit": self.text_chunk_limit,
             "home_channel": self.home_channel,
+            "advanced": dict(self.advanced),
         }
 
 
@@ -157,11 +167,15 @@ def decode_nim_chat_id(value: Any) -> tuple[str | None, str]:
 
 
 def _default_nim_bridge_dir() -> Path:
-    return Path(__file__).resolve().parent / "platforms" / "nim_bridge_js"
+    from nim_bot_py.bridge import NodeBridge
+
+    return NodeBridge.bridge_dir()
 
 
 def _default_nim_bridge_command() -> List[str]:
-    return ["node", str(_default_nim_bridge_dir() / "index.mjs")]
+    from nim_bot_py.bridge import NodeBridge
+
+    return NodeBridge.default_command()
 
 
 def _resolve_nim_bridge_command(value: Any) -> List[str]:
@@ -186,19 +200,52 @@ def _parse_csv_list(value: Any) -> List[str]:
     return [str(value).strip()]
 
 
+def _coerce_mapping(value: Any) -> Dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _first_non_empty(*values: Any) -> Any:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _normalize_nim_policy(value: Any, default: str = "open") -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"open", "allowlist", "disabled"}:
+            return normalized
+    return default
+
+
 def load_nim_config(
     platform: "PlatformConfig",
     environ: Dict[str, str] | None = None,
 ) -> NimResolvedConfig:
-    env = environ or dict(os.environ)
+    env = dict(os.environ) if environ is None else environ
     extra = dict(platform.extra or {})
+    p2p_cfg = _coerce_mapping(extra.get("p2p"))
+    team_cfg = _coerce_mapping(extra.get("team"))
+    qchat_cfg = _coerce_mapping(extra.get("qchat"))
+    advanced_cfg = _coerce_mapping(extra.get("advanced"))
 
-    nim_token = extra.get("nim_token") or env.get("NIM_CREDENTIALS")
+    nim_token = _first_non_empty(extra.get("nimToken"), extra.get("nim_token"), env.get("NIM_CREDENTIALS"))
     credentials = parse_nim_token(nim_token)
     if credentials is None:
-        app_key = extra.get("app_key") or env.get("NIM_APP_KEY")
-        account = extra.get("account") or env.get("NIM_ACCOUNT")
-        token = extra.get("token") or env.get("NIM_TOKEN")
+        app_key = _first_non_empty(extra.get("appKey"), extra.get("app_key"), env.get("NIM_APP_KEY"))
+        account = _first_non_empty(extra.get("account"), env.get("NIM_ACCOUNT"))
+        token = _first_non_empty(extra.get("token"), env.get("NIM_TOKEN"))
         if app_key and account and token:
             credentials = NimCredentials(
                 app_key=str(app_key).strip(),
@@ -206,19 +253,110 @@ def load_nim_config(
                 token=str(token).strip(),
             )
 
+    legacy_p2p_allow = _parse_csv_list(_first_non_empty(extra.get("allowed_users"), env.get("NIM_ALLOWED_USERS")))
+    legacy_allow_all = _coerce_bool(extra.get("allow_all_users", env.get("NIM_ALLOW_ALL_USERS")), default=True)
+    p2p_allow_from = _parse_csv_list(
+        _first_non_empty(
+            p2p_cfg.get("allowFrom"),
+            p2p_cfg.get("allow_from"),
+            legacy_p2p_allow if legacy_p2p_allow else None,
+        )
+    )
+    p2p_policy = _normalize_nim_policy(p2p_cfg.get("policy"))
+    if "policy" not in p2p_cfg:
+        if legacy_allow_all:
+            p2p_policy = "open"
+        elif p2p_allow_from:
+            p2p_policy = "allowlist"
+        else:
+            p2p_policy = "open"
+
+    legacy_team_allow = _parse_csv_list(_first_non_empty(extra.get("group_allowlist"), env.get("NIM_GROUP_ALLOWLIST")))
+    team_allow_from = _parse_csv_list(
+        _first_non_empty(
+            team_cfg.get("allowFrom"),
+            team_cfg.get("allow_from"),
+            legacy_team_allow if legacy_team_allow else None,
+        )
+    )
+    team_policy = _normalize_nim_policy(
+        _first_non_empty(team_cfg.get("policy"), extra.get("group_policy"), env.get("NIM_GROUP_POLICY")),
+        "open",
+    )
+    qchat_policy = _normalize_nim_policy(qchat_cfg.get("policy"), "open")
+    qchat_allow_from = _parse_csv_list(
+        _first_non_empty(qchat_cfg.get("allowFrom"), qchat_cfg.get("allow_from"))
+    )
+
+    media_max_mb = _coerce_int(
+        _first_non_empty(
+            advanced_cfg.get("mediaMaxMb"),
+            advanced_cfg.get("media_max_mb"),
+            extra.get("media_max_mb"),
+            env.get("NIM_MEDIA_MAX_MB"),
+        ),
+        30,
+    )
+    text_chunk_limit = max(
+        1,
+        _coerce_int(
+            _first_non_empty(
+                advanced_cfg.get("textChunkLimit"),
+                advanced_cfg.get("text_chunk_limit"),
+            ),
+            4000,
+        ),
+    )
+    debug = _coerce_bool(
+        _first_non_empty(advanced_cfg.get("debug"), extra.get("debug"), env.get("NIM_DEBUG")),
+        default=False,
+    )
+    advanced: Dict[str, Any] = {
+        "mediaMaxMb": media_max_mb,
+        "textChunkLimit": text_chunk_limit,
+        "debug": debug,
+    }
+    for out_key, candidates in (
+        ("weblbsUrl", ("weblbsUrl", "weblbs_url")),
+        ("link_web", ("link_web",)),
+        ("nos_uploader", ("nos_uploader",)),
+        ("nos_downloader_v2", ("nos_downloader_v2",)),
+        ("nos_accelerate", ("nos_accelerate",)),
+        ("nos_accelerate_host", ("nos_accelerate_host",)),
+    ):
+        value = _first_non_empty(*(advanced_cfg.get(candidate) for candidate in candidates))
+        if value is not None:
+            advanced[out_key] = value
+    nos_ssl = _first_non_empty(advanced_cfg.get("nosSsl"), advanced_cfg.get("nos_ssl"))
+    if nos_ssl is not None:
+        advanced["nosSsl"] = _coerce_bool(nos_ssl, default=False)
+
+    instance_name = _normalize_nim_instance_name(
+        extra.get("instance_name") or extra.get("instanceName") or extra.get("name"),
+        "default",
+    )
+
     return NimResolvedConfig(
-        instance_name=_normalize_nim_instance_name(extra.get("instance_name") or extra.get("name"), "default"),
+        instance_name=instance_name,
         route_prefix=None,
         enabled=platform.enabled,
         credentials=credentials,
-        allowed_users=_parse_csv_list(extra.get("allowed_users") or env.get("NIM_ALLOWED_USERS")),
-        allow_all_users=_coerce_bool(extra.get("allow_all_users", env.get("NIM_ALLOW_ALL_USERS")), default=False),
-        group_policy=str(extra.get("group_policy") or env.get("NIM_GROUP_POLICY") or "allowlist").strip(),
-        group_allowlist=_parse_csv_list(extra.get("group_allowlist") or env.get("NIM_GROUP_ALLOWLIST")),
-        home_channel=str(extra.get("home_channel") or env.get("NIM_HOME_CHANNEL") or "").strip() or None,
-        bridge_command=_resolve_nim_bridge_command(extra.get("bridge_command") or env.get("NIM_BRIDGE_COMMAND")),
-        media_max_mb=int(extra.get("media_max_mb") or env.get("NIM_MEDIA_MAX_MB") or 30),
-        debug=_coerce_bool(extra.get("debug", env.get("NIM_DEBUG")), default=False),
+        p2p_policy=p2p_policy,
+        p2p_allow_from=p2p_allow_from,
+        team_policy=team_policy,
+        team_allow_from=team_allow_from,
+        qchat_policy=qchat_policy,
+        qchat_allow_from=qchat_allow_from,
+        allowed_users=list(p2p_allow_from),
+        allow_all_users=p2p_policy == "open",
+        group_policy=team_policy,
+        group_allowlist=list(team_allow_from),
+        home_channel=str(_first_non_empty(extra.get("home_channel"), extra.get("homeChannel"), env.get("NIM_HOME_CHANNEL")) or "").strip() or None,
+        bridge_command=_default_nim_bridge_command(),
+        media_max_mb=media_max_mb,
+        text_chunk_limit=text_chunk_limit,
+        debug=debug,
+        advanced=advanced,
         raw_extra=extra,
     )
 
@@ -252,7 +390,7 @@ def load_nim_instances(
     platform: "PlatformConfig",
     environ: Dict[str, str] | None = None,
 ) -> List[NimResolvedConfig]:
-    env = environ or dict(os.environ)
+    env = dict(os.environ) if environ is None else environ
     base_extra = dict(platform.extra or {})
     raw_instances = _coerce_nim_instances(base_extra.pop("instances", None))
     env_instances = env.get("NIM_INSTANCES")
@@ -288,8 +426,6 @@ def load_nim_instances(
 
     for index, item in enumerate(raw_instances, start=1):
         instance_extra = {**base_extra, **item}
-        if "instance_name" not in instance_extra and "name" not in instance_extra:
-            instance_extra["instance_name"] = f"nim{index}"
         enabled = _coerce_bool(instance_extra.get("enabled"), default=platform.enabled)
         instance_env = dict(env)
         for key in ("NIM_CREDENTIALS", "NIM_APP_KEY", "NIM_ACCOUNT", "NIM_TOKEN", "NIM_HOME_CHANNEL"):
@@ -306,6 +442,9 @@ def load_nim_instances(
         if not resolved.configured():
             logger.warning("Ignoring unconfigured NIM instance entry: %s", instance_extra.get("instance_name") or instance_extra.get("name") or f"nim{index}")
             continue
+        if "instance_name" not in instance_extra and "instanceName" not in instance_extra and "name" not in instance_extra:
+            fallback_name = resolved.credentials.account if resolved.credentials else f"nim{index}"
+            resolved.instance_name = _normalize_nim_instance_name(fallback_name, f"nim{index}")
         _append_instance(resolved)
 
     multi_instance = len(instances) > 1
@@ -813,6 +952,35 @@ def load_gateway_config() -> GatewayConfig:
                     if merged_extra:
                         merged["extra"] = merged_extra
                     platforms_data[plat_name] = merged
+                gw_data["platforms"] = platforms_data
+            yaml_nim = yaml_cfg.get("nim")
+            if isinstance(yaml_nim, dict):
+                nim_platform = platforms_data.setdefault(Platform.NIM.value, {})
+                if not isinstance(nim_platform, dict):
+                    nim_platform = {}
+                    platforms_data[Platform.NIM.value] = nim_platform
+                nim_existing_extra = nim_platform.get("extra", {})
+                if not isinstance(nim_existing_extra, dict):
+                    nim_existing_extra = {}
+                nim_extra = {
+                    key: value
+                    for key, value in yaml_nim.items()
+                    if key not in {"enabled", "home_channel", "home_channel_name", "reply_to_mode"}
+                }
+                merged_extra = {**nim_existing_extra, **nim_extra}
+                if merged_extra:
+                    nim_platform["extra"] = merged_extra
+                if "enabled" in yaml_nim:
+                    nim_platform["enabled"] = _coerce_bool(yaml_nim.get("enabled"), True)
+                elif "enabled" not in nim_platform and _coerce_nim_instances(merged_extra.get("instances")):
+                    nim_platform["enabled"] = True
+                nim_home_channel = str(yaml_nim.get("home_channel") or "").strip()
+                if nim_home_channel:
+                    nim_platform["home_channel"] = {
+                        "platform": Platform.NIM.value,
+                        "chat_id": nim_home_channel,
+                        "name": str(yaml_nim.get("home_channel_name") or "Home"),
+                    }
                 gw_data["platforms"] = platforms_data
             for plat in Platform:
                 if plat == Platform.LOCAL:
@@ -1470,9 +1638,6 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             extra["account"] = nim_account
         if nim_secret and not nim_instances:
             extra["token"] = nim_secret
-        nim_bridge_command = os.getenv("NIM_BRIDGE_COMMAND", "").strip()
-        if nim_bridge_command:
-            extra["bridge_command"] = nim_bridge_command
         nim_group_policy = os.getenv("NIM_GROUP_POLICY", "").strip().lower()
         if nim_group_policy:
             extra["group_policy"] = nim_group_policy
@@ -1484,7 +1649,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             extra["allowed_users"] = _parse_csv_list(nim_allowed_users)
         nim_allow_all_users = os.getenv("NIM_ALLOW_ALL_USERS", "").strip()
         if nim_allow_all_users:
-            extra["allow_all_users"] = _coerce_bool(nim_allow_all_users, default=False)
+            extra["allow_all_users"] = _coerce_bool(nim_allow_all_users, default=True)
         nim_media_max_mb = os.getenv("NIM_MEDIA_MAX_MB", "").strip()
         if nim_media_max_mb:
             try:

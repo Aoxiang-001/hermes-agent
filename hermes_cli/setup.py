@@ -1992,6 +1992,13 @@ def _setup_feishu():
     _gateway_setup_feishu()
 
 
+def _setup_nim():
+    """Configure NIM / NetEase IM via gateway setup."""
+    from hermes_cli.gateway import _setup_nim as _gateway_setup_nim
+
+    _gateway_setup_nim()
+
+
 def _setup_wecom():
     """Configure WeCom (Enterprise WeChat) via gateway setup."""
     from hermes_cli.gateway import _setup_wecom as _gateway_setup_wecom
@@ -2136,6 +2143,7 @@ _GATEWAY_PLATFORMS = [
     ("WhatsApp", "WHATSAPP_ENABLED", _setup_whatsapp),
     ("DingTalk", "DINGTALK_CLIENT_ID", _setup_dingtalk),
     ("Feishu / Lark", "FEISHU_APP_ID", _setup_feishu),
+    ("NIM (NetEase IM)", "NIM_CREDENTIALS", _setup_nim),
     ("WeCom (Enterprise WeChat)", "WECOM_BOT_ID", _setup_wecom),
     ("WeCom Callback (Self-Built App)", "WECOM_CALLBACK_CORP_ID", _setup_wecom_callback),
     ("Weixin (WeChat)", "WEIXIN_ACCOUNT_ID", _setup_weixin),
@@ -2155,11 +2163,20 @@ def setup_gateway(config: dict):
     # Build checklist items, pre-selecting already-configured platforms
     items = []
     pre_selected = []
+    current_config = config if config else load_config()
+    nim_cfg = current_config.get("nim")
+    nim_instances = nim_cfg.get("instances", []) if isinstance(nim_cfg, dict) else []
+    nim_from_config = isinstance(nim_instances, list) and any(isinstance(item, dict) for item in nim_instances)
+
     for i, (name, env_var, _func) in enumerate(_GATEWAY_PLATFORMS):
         # Matrix has two possible env vars
         is_configured = bool(get_env_value(env_var))
         if name == "Matrix" and not is_configured:
             is_configured = bool(get_env_value("MATRIX_PASSWORD"))
+        if name == "NIM (NetEase IM)" and not is_configured:
+            is_configured = nim_from_config or bool(get_env_value("NIM_INSTANCES")) or all(
+                get_env_value(var) for var in ("NIM_APP_KEY", "NIM_ACCOUNT", "NIM_TOKEN")
+            )
         label = f"{name}  (configured)" if is_configured else name
         items.append(label)
         if is_configured:
@@ -2396,6 +2413,9 @@ def _get_section_config_summary(config: dict, section_key: str) -> Optional[str]
 
     elif section_key == "gateway":
         platforms = []
+        nim_cfg = config.get("nim", {})
+        nim_instances = nim_cfg.get("instances", []) if isinstance(nim_cfg, dict) else []
+        nim_from_config = isinstance(nim_instances, list) and any(isinstance(item, dict) for item in nim_instances)
         if get_env_value("TELEGRAM_BOT_TOKEN"):
             platforms.append("Telegram")
         if get_env_value("DISCORD_BOT_TOKEN"):
@@ -2422,6 +2442,8 @@ def _get_section_config_summary(config: dict, section_key: str) -> Optional[str]
             platforms.append("WeCom")
         if get_env_value("WEIXIN_ACCOUNT_ID"):
             platforms.append("Weixin")
+        if get_env_value("NIM_CREDENTIALS") or get_env_value("NIM_INSTANCES") or nim_from_config:
+            platforms.append("NIM")
         if get_env_value("BLUEBUBBLES_SERVER_URL"):
             platforms.append("BlueBubbles")
         if get_env_value("WEBHOOK_ENABLED"):

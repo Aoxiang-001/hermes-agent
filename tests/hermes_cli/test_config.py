@@ -385,6 +385,9 @@ class TestOptionalEnvVarsRegistry:
         from hermes_cli.config import OPTIONAL_ENV_VARS
         assert OPTIONAL_ENV_VARS["TAVILY_API_KEY"]["url"] == "https://app.tavily.com/home"
 
+    def test_default_config_exposes_top_level_nim_block(self):
+        assert DEFAULT_CONFIG["nim"] == {"instances": []}
+
     def test_tavily_in_env_vars_by_version(self):
         """TAVILY_API_KEY is listed in ENV_VARS_BY_VERSION."""
         from hermes_cli.config import ENV_VARS_BY_VERSION

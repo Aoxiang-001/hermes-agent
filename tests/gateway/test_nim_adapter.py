@@ -3,8 +3,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig, load_nim_config, load_nim_instances
-from gateway.platforms.nim import MultiNimAdapter, NimAdapter, _ensure_bundled_nim_sdk, check_nim_requirements
+from gateway.config import Platform, PlatformConfig, _default_nim_bridge_command, load_nim_config, load_nim_instances
+from gateway.platforms.nim import MultiNimAdapter, NimAdapter, _check_nim_instance_requirements, check_nim_requirements
 from gateway.run import GatewayRunner
 
 
@@ -79,23 +79,50 @@ async def test_send_team_message_uses_team_session_type():
 
 
 @pytest.mark.asyncio
-async def test_send_splits_long_messages():
+async def test_send_qchat_message_uses_qchat_session_type():
     bridge = FakeBridge()
     adapter = NimAdapter(
         PlatformConfig(enabled=True, extra={"nim_token": "app|bot|secret"}),
         bridge=bridge,
     )
 
-    content = ("a" * NimAdapter.MAX_MESSAGE_LENGTH) + "\n" + ("b" * 32)
+    result = await adapter.send("qchat:server-1:channel-2", "hello qchat")
+
+    assert result.success is True
+    assert bridge.sent == [
+        {
+            "chat_id": "qchat:server-1:channel-2",
+            "text": "hello qchat",
+            "session_type": "qchat",
+            "reply_to": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_splits_long_messages():
+    bridge = FakeBridge()
+    adapter = NimAdapter(
+        PlatformConfig(
+            enabled=True,
+            extra={
+                "nim_token": "app|bot|secret",
+                "advanced": {"textChunkLimit": 32},
+            },
+        ),
+        bridge=bridge,
+    )
+
+    content = ("a" * 31) + "\n" + ("b" * 32)
 
     result = await adapter.send("user:123", content)
 
     assert result.success is True
     assert [item["text"] for item in bridge.sent] == [
-        "a" * NimAdapter.MAX_MESSAGE_LENGTH,
-        "\n" + ("b" * 32),
+        ("a" * 31) + "\n",
+        "b" * 32,
     ]
-    assert all(len(item["text"]) <= NimAdapter.MAX_MESSAGE_LENGTH for item in bridge.sent)
+    assert all(len(item["text"]) <= 32 for item in bridge.sent)
 
 
 @pytest.mark.asyncio
@@ -104,7 +131,10 @@ async def test_inbound_dm_respects_allowlist():
     adapter = NimAdapter(
         PlatformConfig(
             enabled=True,
-            extra={"nim_token": "app|bot|secret", "allowed_users": ["allowed-user"]},
+            extra={
+                "nim_token": "app|bot|secret",
+                "p2p": {"policy": "allowlist", "allowFrom": ["allowed-user"]},
+            },
         ),
         bridge=bridge,
     )
@@ -153,8 +183,10 @@ async def test_group_message_requires_allowed_team_and_mention():
             enabled=True,
             extra={
                 "nim_token": "app|bot|secret",
-                "group_policy": "allowlist",
-                "group_allowlist": ["team-1"],
+                "team": {
+                    "policy": "allowlist",
+                    "allowFrom": ["team-1"],
+                },
             },
         ),
         bridge=bridge,
@@ -194,6 +226,64 @@ async def test_group_message_requires_allowed_team_and_mention():
     adapter.handle_message.assert_awaited_once()
     event = adapter.handle_message.await_args.args[0]
     assert event.source.chat_id == "team:team-1"
+    assert event.source.chat_type == "group"
+
+
+@pytest.mark.asyncio
+async def test_qchat_message_requires_allowlist_match_and_mention():
+    bridge = FakeBridge()
+    adapter = NimAdapter(
+        PlatformConfig(
+            enabled=True,
+            extra={
+                "nim_token": "app|bot|secret",
+                "qchat": {
+                    "policy": "allowlist",
+                    "allowFrom": ["server-1|channel-2|allowed-user"],
+                },
+            },
+        ),
+        bridge=bridge,
+    )
+    adapter.handle_message = AsyncMock()
+
+    await adapter._on_bridge_event(
+        {
+            "event": "message",
+            "payload": {
+                "session_type": "qchat",
+                "server_id": "server-1",
+                "channel_id": "channel-2",
+                "target_id": "server-1:channel-2",
+                "sender_id": "blocked-user",
+                "text": "@bot hello",
+                "message_type": "text",
+                "mentioned": True,
+            },
+        }
+    )
+    adapter.handle_message.assert_not_awaited()
+
+    await adapter._on_bridge_event(
+        {
+            "event": "message",
+            "payload": {
+                "message_id": "m-qchat-1",
+                "session_type": "qchat",
+                "server_id": "server-1",
+                "channel_id": "channel-2",
+                "target_id": "server-1:channel-2",
+                "sender_id": "allowed-user",
+                "text": "@bot hello",
+                "message_type": "text",
+                "mentioned": True,
+            },
+        }
+    )
+
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+    assert event.source.chat_id == "qchat:server-1:channel-2"
     assert event.source.chat_type == "group"
 
 
@@ -346,82 +436,66 @@ def test_runner_uses_multi_adapter_for_single_explicit_instance(monkeypatch):
     assert isinstance(adapter, MultiNimAdapter)
 
 
-def test_check_nim_requirements_supports_explicit_command(tmp_path):
-    bridge_path = tmp_path / "index.mjs"
-    bridge_path.write_text("console.log('ok')\n", encoding="utf-8")
-
-    assert check_nim_requirements(
+def test_load_nim_config_hardcodes_packaged_bridge_command():
+    resolved = load_nim_config(
         PlatformConfig(
             enabled=True,
             extra={
                 "nim_token": "app|bot|secret",
-                "bridge_command": ["node", str(bridge_path)],
+                "bridge_command": ["node", "/tmp/custom/index.mjs"],
             },
-        )
-    ) is True
+        ),
+        {"NIM_BRIDGE_COMMAND": "node /tmp/ignored/index.mjs"},
+    )
+
+    assert resolved.bridge_command == _default_nim_bridge_command()
 
 
 def test_check_nim_requirements_supports_bundled_bridge(monkeypatch, tmp_path):
-    bridge_dir = tmp_path / "nim_bridge_js"
-    sdk_dir = bridge_dir / "node_modules" / "@yxim" / "nim-bot"
-    sdk_dir.mkdir(parents=True)
-    (bridge_dir / "index.mjs").write_text("console.log('ok')\n", encoding="utf-8")
-    (bridge_dir / "package.json").write_text('{"name":"nim-bridge"}\n', encoding="utf-8")
+    bridge_dir = tmp_path / "nim_bot_py" / "bridge_js"
+    bridge_dir.mkdir(parents=True)
+    bridge_script = bridge_dir / "index.mjs"
+    bridge_script.write_text("console.log('ok')\n", encoding="utf-8")
 
-    monkeypatch.setattr("gateway.platforms.nim._default_nim_bridge_dir", lambda: bridge_dir)
-    monkeypatch.setattr("gateway.platforms.nim._default_nim_bridge_command", lambda: ["node", str(bridge_dir / "index.mjs")])
-    monkeypatch.setattr("gateway.config._default_nim_bridge_command", lambda: ["node", str(bridge_dir / "index.mjs")])
+    monkeypatch.setattr("gateway.platforms.nim._default_nim_bridge_command", lambda: ["node", str(bridge_script)])
+    monkeypatch.setattr("gateway.config._default_nim_bridge_command", lambda: ["node", str(bridge_script)])
     monkeypatch.setattr("gateway.platforms.nim.shutil.which", lambda name: f"/usr/bin/{name}")
+
+    class FakePackagedBridge:
+        def __init__(self, command):
+            self.command = command
+
+        def ensure_runtime(self):
+            return None
+
+    monkeypatch.setattr("gateway.platforms.nim.PackagedNodeBridge", FakePackagedBridge)
 
     assert check_nim_requirements(
         PlatformConfig(enabled=True, extra={"nim_token": "app|bot|secret"})
     ) is True
 
 
-def test_ensure_bundled_nim_sdk_auto_installs_when_missing(monkeypatch, tmp_path):
-    bridge_dir = tmp_path / "nim_bridge_js"
-    sdk_dir = bridge_dir / "node_modules" / "@yxim" / "nim-bot"
+def test_check_nim_instance_requirements_fails_when_packaged_bridge_runtime_is_unavailable(monkeypatch, tmp_path):
+    bridge_dir = tmp_path / "nim_bot_py" / "bridge_js"
     bridge_dir.mkdir(parents=True)
-    (bridge_dir / "index.mjs").write_text("console.log('ok')\n", encoding="utf-8")
-    (bridge_dir / "package.json").write_text('{"name":"nim-bridge"}\n', encoding="utf-8")
+    bridge_script = bridge_dir / "index.mjs"
+    bridge_script.write_text("console.log('ok')\n", encoding="utf-8")
 
-    calls = []
+    monkeypatch.setattr("gateway.platforms.nim._default_nim_bridge_command", lambda: ["node", str(bridge_script)])
+    monkeypatch.setattr("gateway.config._default_nim_bridge_command", lambda: ["node", str(bridge_script)])
+    monkeypatch.setattr("gateway.platforms.nim.shutil.which", lambda name: f"/usr/bin/{name}")
 
-    def fake_which(name):
-        if name in {"node", "npm"}:
-            return f"/usr/bin/{name}"
-        return None
+    class FakePackagedBridge:
+        def __init__(self, command):
+            self.command = command
 
-    def fake_run(cmd, check, capture_output, text):
-        calls.append(cmd)
-        sdk_dir.mkdir(parents=True)
-        return SimpleNamespace(stdout="", stderr="")
+        def ensure_runtime(self):
+            from nim_bot_py.bridge import NimBridgeError
 
-    monkeypatch.setattr("gateway.platforms.nim.shutil.which", fake_which)
-    monkeypatch.setattr("gateway.platforms.nim.subprocess.run", fake_run)
+            raise NimBridgeError("npm not found")
 
-    assert _ensure_bundled_nim_sdk(bridge_dir) is True
-    assert calls == [[
-        "/usr/bin/npm",
-        "install",
-        "--no-fund",
-        "--no-audit",
-        "--prefix",
-        str(bridge_dir),
-    ]]
+    monkeypatch.setattr("gateway.platforms.nim.PackagedNodeBridge", FakePackagedBridge)
 
-
-def test_ensure_bundled_nim_sdk_fails_without_npm_when_sdk_missing(monkeypatch, tmp_path):
-    bridge_dir = tmp_path / "nim_bridge_js"
-    bridge_dir.mkdir(parents=True)
-    (bridge_dir / "index.mjs").write_text("console.log('ok')\n", encoding="utf-8")
-    (bridge_dir / "package.json").write_text('{"name":"nim-bridge"}\n', encoding="utf-8")
-
-    def fake_which(name):
-        if name == "node":
-            return "/usr/bin/node"
-        return None
-
-    monkeypatch.setattr("gateway.platforms.nim.shutil.which", fake_which)
-
-    assert _ensure_bundled_nim_sdk(bridge_dir) is False
+    resolved = load_nim_config(PlatformConfig(enabled=True, extra={"nim_token": "app|bot|secret"}), {})
+    assert resolved.bridge_command == ["node", str(bridge_script)]
+    assert _check_nim_instance_requirements(resolved) is False

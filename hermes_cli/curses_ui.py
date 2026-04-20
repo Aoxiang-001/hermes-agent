@@ -146,7 +146,10 @@ def curses_checklist(
                 elif key == ord(" "):
                     chosen.symmetric_difference_update({cursor})
                 elif key in (curses.KEY_ENTER, 10, 13):
-                    result_holder[0] = set(chosen)
+                    if not chosen and items:
+                        result_holder[0] = {cursor}
+                    else:
+                        result_holder[0] = set(chosen)
                     return
                 elif key in (27, ord("q")):
                     result_holder[0] = cancel_returns
